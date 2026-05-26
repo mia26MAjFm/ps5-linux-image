@@ -40,7 +40,7 @@ jobs:
         run: |
           INPUT="${{ inputs.distro || 'ubuntu2604' }}"
           if [ "$INPUT" = "all" ]; then
-            echo 'distros=["ubuntu2604","arch","cachyos"]' >> "$GITHUB_OUTPUT"
+            echo 'distros=["ubuntu2604","arch","cachyos","kali"]' >> "$GITHUB_OUTPUT"
           else
             echo "distros=[\"$INPUT\"]" >> "$GITHUB_OUTPUT"
           fi
