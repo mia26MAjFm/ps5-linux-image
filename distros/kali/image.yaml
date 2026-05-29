@@ -90,6 +90,13 @@ packages:
     - curl
     - wget
     - git
+    - ca-certificates
+    - build-essential
+    - bc
+    - bison
+    - flex
+    - libssl-dev
+    - libelf-dev
     - vim
     - nano
     - tmux
@@ -278,6 +285,100 @@ actions:
 
     KVER=$(ls -1t /lib/modules | head -1)
     depmod -a "$KVER"
+
+    # PS5 internal WiFi uses the Marvell/NXP IW620 at PCI ID 1b4b:2b56. Build
+    # the PS5-patched NXP mwifiex module for the installed PS5 kernel. Firmware
+    # is console-provided by ps5-linux-loader on the boot partition, so a boot
+    # service copies it into /lib/firmware before loading the module.
+    IW620_SRC=/tmp/ps5-iw620-mwifiex
+    IW620_PATCHES=/tmp/ps5-linux-mwifiex
+    IW620_NXP_REF=a5fe4e194bf99315e349d81d77d6dfacec70757a
+    IW620_PATCH_REF=5cfd063449f27e2f8a7d17c814a3bb21c27aa903
+    rm -rf "$IW620_SRC" "$IW620_PATCHES"
+    git clone https://github.com/nxp-imx/mwifiex.git "$IW620_SRC"
+    git -C "$IW620_SRC" checkout "$IW620_NXP_REF"
+    git clone https://github.com/ps5-linux/ps5-linux-mwifiex.git "$IW620_PATCHES"
+    git -C "$IW620_PATCHES" checkout "$IW620_PATCH_REF"
+    git -C "$IW620_SRC" apply "$IW620_PATCHES/ps5-iw620.patch"
+    make -C "$IW620_SRC" CONFIG_OBJTOOL= KERNELDIR="/lib/modules/$KVER/build" ARCH=x86 -j"$(nproc)"
+    test -f "$IW620_SRC/mlan.ko"
+    test -f "$IW620_SRC/moal.ko"
+    install -d "/lib/modules/$KVER/extra/ps5-iw620"
+    install -m 0644 "$IW620_SRC/mlan.ko" "/lib/modules/$KVER/extra/ps5-iw620/mlan.ko"
+    install -m 0644 "$IW620_SRC/moal.ko" "/lib/modules/$KVER/extra/ps5-iw620/moal.ko"
+    install -d /etc/modprobe.d /usr/local/sbin /etc/systemd/system /usr/share/doc/ps5-iw620
+    cat > /etc/modprobe.d/ps5-iw620.conf <<'EOF'
+    # PS5 IW620 mwifiex
+    # Prevent udev from auto-loading moal before the loader-provided firmware is
+    # copied from the boot partition. ps5-iw620.service loads it explicitly.
+    blacklist moal
+    blacklist mlan
+    softdep moal pre: cfg80211 mlan
+    options moal fw_name=nxp/pcieuartiw620_combo_v1.bin pcie_int_mode=1 drv_mode=1 cfg80211_wext=4 sta_name=mlan ext_scan=0 auto_fw_reload=0 wifi_reset_config=0 sched_scan=0 ps_mode=2 auto_ds=2 amsdu_disable=1
+    EOF
+    cat > /usr/local/sbin/ps5-iw620-load <<'EOF'
+    #!/bin/sh
+    set -eu
+
+    FW_NAME=nxp/pcieuartiw620_combo_v1.bin
+    FW_DST=/lib/firmware/$FW_NAME
+    FW_SRC=
+
+    for candidate in "/boot/efi/lib/$FW_NAME" "/boot/lib/$FW_NAME" "$FW_DST"; do
+      if [ -f "$candidate" ]; then
+        FW_SRC="$candidate"
+        break
+      fi
+    done
+
+    if [ -z "$FW_SRC" ]; then
+      FW_SRC="$(find /boot /boot/efi -path "*/$FW_NAME" -type f 2>/dev/null | head -n 1)"
+    fi
+
+    if [ -n "$FW_SRC" ] && [ -f "$FW_SRC" ]; then
+      install -D -m 0644 "$FW_SRC" "$FW_DST"
+    fi
+
+    if [ ! -f "$FW_DST" ]; then
+      echo "PS5 IW620 firmware not found on the boot partition; skipping WiFi load"
+      exit 0
+    fi
+
+    # If udev raced us and loaded the module before firmware was copied, reload
+    # it so firmware init can succeed.
+    modprobe -r moal mlan 2>/dev/null || true
+    modprobe cfg80211 || true
+    modprobe moal
+    rfkill unblock all 2>/dev/null || true
+    nmcli radio wifi on 2>/dev/null || true
+    EOF
+    chmod 0755 /usr/local/sbin/ps5-iw620-load
+    cat > /etc/systemd/system/ps5-iw620.service <<'EOF'
+    [Unit]
+    Description=Load PS5 IW620 internal WiFi
+    RequiresMountsFor=/boot/efi
+    Wants=systemd-udev-settle.service
+    After=local-fs.target boot-efi.mount systemd-udev-settle.service
+    Before=NetworkManager.service network-pre.target
+
+    [Service]
+    Type=oneshot
+    ExecStart=/usr/local/sbin/ps5-iw620-load
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+    cat > /usr/share/doc/ps5-iw620/BUILDINFO <<EOF
+    NXP mwifiex ref: $IW620_NXP_REF
+    ps5-linux-mwifiex ref: $IW620_PATCH_REF
+    Kernel: $KVER
+    Module options: fw_name=nxp/pcieuartiw620_combo_v1.bin pcie_int_mode=1 drv_mode=1 cfg80211_wext=4 sta_name=mlan ext_scan=0 auto_fw_reload=0 wifi_reset_config=0 sched_scan=0 ps_mode=2 auto_ds=2 amsdu_disable=1
+    EOF
+    depmod -a "$KVER"
+    systemctl enable ps5-iw620.service
+    rm -rf "$IW620_SRC" "$IW620_PATCHES"
+
     grep -qxF amdgpu /etc/initramfs-tools/modules || printf '\namdgpu\n' >> /etc/initramfs-tools/modules
     printf 'MODULES=most\nBUSYBOX=y\n' > /etc/initramfs-tools/conf.d/ps5-amdgpu
     update-initramfs -c -k "$KVER"
