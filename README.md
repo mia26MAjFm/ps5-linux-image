@@ -81,6 +81,15 @@ sudo timedatectl set-timezone America/Kentucky/Louisville
 timedatectl status
 ```
 
+## Kali Internal WiFi
+
+The Kali image builds and installs the PS5 IW620 `mwifiex` modules for the
+PS5-patched kernel. On boot, `ps5-iw620.service` copies the console-specific
+firmware dumped by `ps5-linux-loader` from `/boot/efi/lib/nxp/` into
+`/lib/firmware/nxp/`, loads the driver, and enables WiFi radio. If the firmware
+payload is present, NetworkManager should expose the internal interface as
+`mlan0` and the Xfce network applet can be used to scan and connect.
+
 The Kali desktop autologin is enabled for local first boot. SSH is installed
 but disabled by default because the initial local account is `kali` with
 password `kali`. Before enabling remote access, change that password:
