@@ -64,19 +64,31 @@ jobs:
         distro: ${{ fromJson(needs.matrix.outputs.distros) }}
 
     steps:
-      - name: Maximize disk space
-        # Strip ~30 GB of pre-installed tooling we never use (.NET, Android
-        # SDK, Haskell, CodeQL, etc) so the kernel build + 12 GB raw image +
-        # xz output all fit on the runner's 84 GB disk.
-        uses: easimon/maximize-build-space@v10
-        with:
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-          root-reserve-mb: 4096
-          swap-size-mb: 1024
+      - name: Free disk space
+        # Strip ~30 GB of pre-installed tooling we never use. easimon's
+        # maximize-build-space carves an LVM volume out of the existing
+        # disk, but Docker stores images at /var/lib/docker (on the root
+        # FS) — when root fills, build_image.sh fails immediately. Skip
+        # the LVM carve and just delete unused tooling in place so the
+        # full ~80 GB stays on / where docker (and build_image.sh) write.
+        run: |
+          set -euxo pipefail
+          sudo rm -rf \
+            /opt/hostedtoolcache \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/local/lib/node_modules \
+            /opt/ghc \
+            /opt/google \
+            /opt/microsoft \
+            /opt/pipx \
+            /usr/share/swift \
+            /usr/share/miniconda \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Checkout
         uses: actions/checkout@v4
