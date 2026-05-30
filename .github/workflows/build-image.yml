@@ -1,206 +1,151 @@
 name: Build Image
-run-name: Build Image (${{ inputs.distro || 'all' }})
+run-name: Build ${{ inputs.distro || 'cachyos' }}
 
 on:
   workflow_dispatch:
     inputs:
       distro:
-        description: 'Distribution'
-        default: 'ubuntu2604'
+        description: Distribution
+        default: cachyos
         type: choice
-        options: [all, ubuntu2604, arch, cachyos, kali]
+        options:
+          - all
+          - ubuntu2604
+          - mint22-cinnamon
+          - debian13-xfce
+          - debian13-server
+          - debian13-gnome
+          - debian13-kde
+          - debian13-proxmox
+          - arch
+          - cachyos
+          - alpine
+          - fedora-gnome
+          - fedora-kde
+          - bazzite
+          - bazzite-deck
+          - batocera
+          - artix-openrc
+          - devuan-sway
+          - miaos
   workflow_call:
     inputs:
       distro:
         type: string
-        default: 'ubuntu2604'
-    secrets:
-      REMOTE_SSH_KEY:
-        required: true
-      REMOTE_SSH_CONFIG:
-        required: true
-      REMOTE_SSH_KNOWN_HOSTS:
-        required: true
-      R2_ACCESS_KEY_ID:
-        required: true
-      R2_SECRET_ACCESS_KEY:
-        required: true
-      R2_ENDPOINT:
-        required: true
-      R2_BUCKET:
-        required: true
+        default: cachyos
 
 jobs:
   matrix:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       distros: ${{ steps.set.outputs.distros }}
     steps:
       - id: set
         run: |
-          INPUT="${{ inputs.distro || 'ubuntu2604' }}"
+          INPUT="${{ inputs.distro || 'cachyos' }}"
           if [ "$INPUT" = "all" ]; then
-            echo 'distros=["kali","ubuntu2604","arch","cachyos"]' >> "$GITHUB_OUTPUT"
+            # Skip bazzite-deck (24 GB raw, may not fit on the runner) for now.
+            echo 'distros=["ubuntu2604","mint22-cinnamon","debian13-xfce","debian13-server","debian13-gnome","debian13-kde","debian13-proxmox","arch","cachyos","alpine","fedora-gnome","fedora-kde","bazzite","batocera","artix-openrc","devuan-sway","miaos"]' >> "$GITHUB_OUTPUT"
           else
             echo "distros=[\"$INPUT\"]" >> "$GITHUB_OUTPUT"
           fi
 
   build:
     needs: matrix
-    runs-on: self-hosted
-    timeout-minutes: 720
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
     permissions:
       contents: write
 
     strategy:
-      fail-fast: true
-      max-parallel: 1
+      fail-fast: false
+      max-parallel: 4
       matrix:
         distro: ${{ fromJson(needs.matrix.outputs.distros) }}
 
-    env:
-      CCACHE_DIR: /home/opc/ccache
-
     steps:
-      - name: Clean image workspace
-        run: |
-          set -euo pipefail
-          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ "$GITHUB_WORKSPACE" = "/" ]; then
-            echo "Invalid GITHUB_WORKSPACE" >&2
-            exit 1
-          fi
-          sudo rm -rf "$GITHUB_WORKSPACE/image"
-
-      - name: Checkout image builder
-        uses: actions/checkout@v6
+      - name: Maximize disk space
+        # Strip ~30 GB of pre-installed tooling we never use (.NET, Android
+        # SDK, Haskell, CodeQL, etc) so the kernel build + 12 GB raw image +
+        # xz output all fit on the runner's 84 GB disk.
+        uses: easimon/maximize-build-space@v10
         with:
-          path: image
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          root-reserve-mb: 4096
+          swap-size-mb: 1024
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache kernel build (per PATCHES_REF + MWIFIEX_REF)
+        uses: actions/cache@v4
+        with:
+          path: |
+            work/linux
+            linux-bin
+            ccache
+          key: kernel-${{ hashFiles('build_image.sh') }}-${{ runner.os }}
+          restore-keys: |
+            kernel-
 
       - name: Build ${{ matrix.distro }} image
+        env:
+          CI: 'true'
         run: |
-          bash image/build_image.sh --distro "${{ matrix.distro }}"
-
-      - name: Set version info
-        id: version
-        run: |
-          psha=$(git -C image/work/ps5-linux-patches rev-parse --short HEAD 2>/dev/null || echo "unknown")
-          kver=$(cat image/linux-bin/VERSION 2>/dev/null || echo "unknown")
-          ts=$(date -u +%Y%m%d-%H%M%S)
-          echo "psha=$psha" >> "$GITHUB_OUTPUT"
-          echo "kver=$kver" >> "$GITHUB_OUTPUT"
-          echo "ts=$ts" >> "$GITHUB_OUTPUT"
-
-      - name: Report
-        run: |
-          ls -lh image/output/*.img
-          sha256sum image/output/*.img
+          # Retry once on transient mirror / network errors.
+          bash build_image.sh --distro "${{ matrix.distro }}" || \
+            ( sudo rm -rf work/chroot && bash build_image.sh --distro "${{ matrix.distro }}" )
 
       - name: Compress image
         run: |
-          xz -T0 -9 -c image/output/ps5-${{ matrix.distro }}.img \
-            > image/output/ps5-${{ matrix.distro }}.img.xz
+          xz -T0 -9 -c "output/ps5-${{ matrix.distro }}.img" \
+            > "output/ps5-${{ matrix.distro }}.img.xz"
+          rm -f "output/ps5-${{ matrix.distro }}.img"
+          ls -lh output/
 
-      - name: Upload to R2
-        if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      - name: Split if > 1.9 GB (GitHub release-asset cap is 2 GB)
+        run: |
+          F="output/ps5-${{ matrix.distro }}.img.xz"
+          SZ=$(stat -c%s "$F")
+          MAX=$((1900*1024*1024))
+          if [ "$SZ" -gt "$MAX" ]; then
+            split -b 1900M -d -a 1 "$F" "$F.part-"
+            rm "$F"
+          fi
+          ls -lh output/
+
+      - name: Generate per-distro checksums
+        run: |
+          cd output
+          sha256sum ps5-${{ matrix.distro }}.img.xz* > "ps5-${{ matrix.distro }}.sha256"
+          cat "ps5-${{ matrix.distro }}.sha256"
+
+      - name: Ensure 'latest' release exists
         env:
-          RCLONE_CONFIG_R2_TYPE: s3
-          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
-          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: true
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          rclone copyto image/output/ps5-${{ matrix.distro }}.img.xz \
-            "r2:${{ secrets.R2_BUCKET }}/ps5-${{ matrix.distro }}.img.xz"
+          if ! gh release view latest -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create latest -R "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "PS5 Linux — latest" \
+              --notes "Auto-built by GitHub Actions. Images >1.9 GB are split — reassemble with: \`cat ps5-<distro>.img.xz.part-* > ps5-<distro>.img.xz\` before \`xz -d\`."
+          fi
 
-      - name: Save build metadata
-        run: |
-          mkdir -p meta
-          sha256sum image/output/ps5-${{ matrix.distro }}.img.xz \
-            | sed 's|image/output/||' > meta/${{ matrix.distro }}.sha256
-          echo "${{ steps.version.outputs.kver }}" > meta/kver
-          echo "${{ steps.version.outputs.psha }}" > meta/psha
-          echo "${{ steps.version.outputs.ts }}" > meta/ts
-
-      - name: Upload build metadata
-        uses: actions/upload-artifact@v6
-        with:
-          name: meta-${{ matrix.distro }}
-          path: meta/
-          retention-days: 1
-
-      - name: Upload to remote
-        if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      - name: Replace this distro's assets on 'latest'
         env:
-          SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
-          SSH_CONFIG: ${{ secrets.REMOTE_SSH_CONFIG }}
-          SSH_KNOWN_HOSTS: ${{ secrets.REMOTE_SSH_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          DIR=$(mktemp -d)
-          echo "$SSH_KEY" > "$DIR/key"
-          chmod 600 "$DIR/key"
-          echo "$SSH_CONFIG" > "$DIR/config"
-          sed -i "s|~/.ssh/remote_key|$DIR/key|" "$DIR/config"
-          echo "$SSH_KNOWN_HOSTS" > "$DIR/known_hosts"
-          SSH="ssh -F $DIR/config -o UserKnownHostsFile=$DIR/known_hosts"
-          SCP="scp -F $DIR/config -o UserKnownHostsFile=$DIR/known_hosts"
-          DEST="image-${{ matrix.distro }}-${{ steps.version.outputs.ts }}"
-          $SSH remote mkdir -p "./$DEST"
-          $SCP image/output/*.img.xz "remote:./$DEST/"
-          $SSH remote 'ls -dt image-${{ matrix.distro }}-*/ | tail -n +5 | xargs rm -rf' || true
-          rm -rf "$DIR"
-
-  release:
-    needs: build
-    runs-on: self-hosted
-    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
-    permissions:
-      contents: write
-    steps:
-      - name: Download build metadata
-        uses: actions/download-artifact@v6
-        with:
-          pattern: meta-*
-          path: meta
-          merge-multiple: true
-
-      - name: Prepare release body
-        id: body
-        run: |
-          KVER=$(cat meta/kver)
-          PSHA=$(cat meta/psha)
-          TS=$(cat meta/ts)
-          SUMS=$(cat meta/*.sha256)
-
-          {
-            echo 'text<<EOF'
-            echo "PS5 Linux images — built from latest \`main\`."
-            echo ""
-            echo "Kernel: \`$KVER\`"
-            echo "Patches: [\`$PSHA\`](https://github.com/ps5-linux/ps5-linux-patches/commit/$PSHA)"
-            echo "Built: \`$TS\`"
-            echo ""
-            echo "| Image | Download |"
-            echo "|-------|----------|"
-            echo "| Ubuntu 26.04 | [\`ps5-ubuntu2604.img.xz\`](https://pub-561df4012f1a46fbbdf618d5cc5941f6.r2.dev/ps5-ubuntu2604.img.xz) |"
-            echo "| Arch | [\`ps5-arch.img.xz\`](https://pub-561df4012f1a46fbbdf618d5cc5941f6.r2.dev/ps5-arch.img.xz) |"
-            echo "| CachyOS | [\`ps5-cachyos.img.xz\`](https://pub-561df4012f1a46fbbdf618d5cc5941f6.r2.dev/ps5-cachyos.img.xz) |"
-            if [ -f meta/kali.sha256 ]; then
-              echo "| Kali | [\`ps5-kali.img.xz\`](https://pub-561df4012f1a46fbbdf618d5cc5941f6.r2.dev/ps5-kali.img.xz) |"
-            fi
-            echo ""
-            echo "**SHA256 checksums:**"
-            echo "\`\`\`"
-            echo "$SUMS"
-            echo "\`\`\`"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create or update release
-        uses: softprops/action-gh-release@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: latest
-          name: PS5 Linux Image (latest)
-          body: ${{ steps.body.outputs.text }}
-          make_latest: true
+          # Delete prior assets for THIS distro only (other distros keep theirs).
+          mapfile -t OLD < <(gh release view latest -R "$GITHUB_REPOSITORY" --json assets \
+            -q ".assets[].name" | grep -E "^ps5-${{ matrix.distro }}\.")
+          for f in "${OLD[@]}"; do
+            gh release delete-asset -R "$GITHUB_REPOSITORY" latest "$f" --yes || true
+          done
+          gh release upload latest -R "$GITHUB_REPOSITORY" \
+            output/ps5-${{ matrix.distro }}.img.xz* \
+            output/ps5-${{ matrix.distro }}.sha256 \
+            --clobber
