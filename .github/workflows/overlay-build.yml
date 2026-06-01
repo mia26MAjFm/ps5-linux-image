@@ -1,0 +1,141 @@
+name: Overlay Build
+run-name: Overlay Build (${{ inputs.distro || 'miaos' }})
+
+# This action overlays the extra distros + entrypoint tweaks from this repo
+# on top of a fresh checkout of ps5-linux/ps5-linux-image, then runs upstream's
+# build_image.sh. The upstream pipeline is untouched — we never edit their
+# action or their distro definitions. New distros that don't exist upstream
+# (debian13-*, fedora-*, miaos, bazzite, batocera, artix-openrc, etc.) are
+# dropped under build/distros/ via the overlay/ directory of this repo, and
+# the bazzite/batocera/artix special-cases are picked up from our overlay
+# version of docker/image-builder/entrypoint.sh.
+
+on:
+  workflow_dispatch:
+    inputs:
+      distro:
+        description: Distribution
+        default: miaos
+        type: choice
+        options:
+          # Our additions:
+          - miaos
+          - debian13-gnome
+          - debian13-kde
+          - debian13-server
+          - debian13-xfce
+          - debian13-proxmox
+          - fedora-gnome
+          - fedora-kde
+          - mint22-cinnamon
+          - bazzite
+          - bazzite-deck
+          - batocera
+          - artix-openrc
+          - devuan-sway
+          - alpine
+          # Upstream distros (handled by upstream pipeline as-is):
+          - arch
+          - cachyos
+          - kali
+          - ubuntu2604
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: write
+
+    steps:
+      - name: Free disk space
+        # Inline cleanup — see ../README.md for the rationale; we never use
+        # the ~30 GB of preinstalled .NET/Android/Haskell tooling.
+        run: |
+          set -euxo pipefail
+          sudo rm -rf \
+            /opt/hostedtoolcache /usr/local/lib/android /usr/share/dotnet \
+            /usr/local/share/boost /usr/local/share/powershell \
+            /usr/local/lib/node_modules /opt/ghc /opt/google /opt/microsoft \
+            /opt/pipx /usr/share/swift /usr/share/miniconda \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Checkout upstream ps5-linux/ps5-linux-image
+        uses: actions/checkout@v4
+        with:
+          repository: ps5-linux/ps5-linux-image
+          path: build
+
+      - name: Checkout this repo (overlay)
+        uses: actions/checkout@v4
+        with:
+          path: overlay-src
+
+      - name: Apply overlay on top of upstream checkout
+        # Copy our extra distros + replace docker/image-builder/entrypoint.sh
+        # with our superset. Upstream files we don't override stay untouched.
+        run: |
+          set -euxo pipefail
+          cp -r overlay-src/overlay/distros/. build/distros/
+          cp -r overlay-src/overlay/docker/. build/docker/
+          echo "--- distros after overlay ---"
+          ls build/distros/
+
+      - name: Cache kernel build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/work/linux
+            build/linux-bin
+            build/ccache
+          key: kernel-${{ hashFiles('build/build_image.sh') }}-${{ runner.os }}
+          restore-keys: |
+            kernel-
+
+      - name: Build ${{ inputs.distro }}
+        env:
+          CI: 'true'
+        run: |
+          cd build
+          bash build_image.sh --distro "${{ inputs.distro }}"
+
+      - name: Compress + split
+        run: |
+          set -euxo pipefail
+          cd build/output
+          xz -T0 -9 -c "ps5-${{ inputs.distro }}.img" \
+            > "ps5-${{ inputs.distro }}.img.xz"
+          rm -f "ps5-${{ inputs.distro }}.img"
+          F="ps5-${{ inputs.distro }}.img.xz"
+          if [ $(stat -c%s "$F") -gt $((1900*1024*1024)) ]; then
+            split -b 1900M -d -a 1 "$F" "$F.part-"
+            rm "$F"
+          fi
+          sha256sum ps5-${{ inputs.distro }}.img.xz* \
+            > "ps5-${{ inputs.distro }}.sha256"
+          ls -lh
+
+      - name: Upload to 'latest' release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          cd build/output
+          if ! gh release view latest -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create latest -R "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "PS5 Linux — latest" \
+              --notes "Auto-built. Files >1.9 GB are split — reassemble with \`cat ps5-<distro>.img.xz.part-* > ps5-<distro>.img.xz\` before xz -d."
+          fi
+          mapfile -t OLD < <(gh release view latest -R "$GITHUB_REPOSITORY" \
+            --json assets -q ".assets[].name" \
+            | grep -E "^ps5-${{ inputs.distro }}\." || true)
+          for f in "${OLD[@]}"; do
+            gh release delete-asset -R "$GITHUB_REPOSITORY" latest "$f" --yes || true
+          done
+          gh release upload latest -R "$GITHUB_REPOSITORY" \
+            ps5-${{ inputs.distro }}.img.xz* \
+            ps5-${{ inputs.distro }}.sha256 \
+            --clobber
