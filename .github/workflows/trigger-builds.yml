@@ -17,9 +17,6 @@ jobs:
     with:
       distro: all
     secrets:
-      REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
-      REMOTE_SSH_CONFIG: ${{ secrets.REMOTE_SSH_CONFIG }}
-      REMOTE_SSH_KNOWN_HOSTS: ${{ secrets.REMOTE_SSH_KNOWN_HOSTS }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}

@@ -15,12 +15,6 @@ on:
         type: string
         default: 'ubuntu2604'
     secrets:
-      REMOTE_SSH_KEY:
-        required: true
-      REMOTE_SSH_CONFIG:
-        required: true
-      REMOTE_SSH_KNOWN_HOSTS:
-        required: true
       R2_ACCESS_KEY_ID:
         required: true
       R2_SECRET_ACCESS_KEY:
@@ -128,27 +122,6 @@ jobs:
           name: meta-${{ matrix.distro }}
           path: meta/
           retention-days: 1
-
-      - name: Upload to remote
-        if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
-        env:
-          SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
-          SSH_CONFIG: ${{ secrets.REMOTE_SSH_CONFIG }}
-          SSH_KNOWN_HOSTS: ${{ secrets.REMOTE_SSH_KNOWN_HOSTS }}
-        run: |
-          DIR=$(mktemp -d)
-          echo "$SSH_KEY" > "$DIR/key"
-          chmod 600 "$DIR/key"
-          echo "$SSH_CONFIG" > "$DIR/config"
-          sed -i "s|~/.ssh/remote_key|$DIR/key|" "$DIR/config"
-          echo "$SSH_KNOWN_HOSTS" > "$DIR/known_hosts"
-          SSH="ssh -F $DIR/config -o UserKnownHostsFile=$DIR/known_hosts"
-          SCP="scp -F $DIR/config -o UserKnownHostsFile=$DIR/known_hosts"
-          DEST="image-${{ matrix.distro }}-${{ steps.version.outputs.ts }}"
-          $SSH remote mkdir -p "./$DEST"
-          $SCP image/output/*.img.xz "remote:./$DEST/"
-          $SSH remote 'ls -dt image-${{ matrix.distro }}-*/ | tail -n +5 | xargs rm -rf' || true
-          rm -rf "$DIR"
 
   release:
     needs: build

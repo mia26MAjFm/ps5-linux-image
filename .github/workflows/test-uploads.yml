@@ -65,24 +65,6 @@ jobs:
           path: meta/
           retention-days: 1
 
-      - name: Upload to remote
-        env:
-          SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
-          SSH_CONFIG: ${{ secrets.REMOTE_SSH_CONFIG }}
-          SSH_KNOWN_HOSTS: ${{ secrets.REMOTE_SSH_KNOWN_HOSTS }}
-        run: |
-          DIR=$(mktemp -d)
-          echo "$SSH_KEY" > "$DIR/key"
-          chmod 600 "$DIR/key"
-          echo "$SSH_CONFIG" > "$DIR/config"
-          sed -i "s|~/.ssh/remote_key|$DIR/key|" "$DIR/config"
-          echo "$SSH_KNOWN_HOSTS" > "$DIR/known_hosts"
-          SSH="ssh -F $DIR/config -o UserKnownHostsFile=$DIR/known_hosts"
-          SCP="scp -F $DIR/config -o UserKnownHostsFile=$DIR/known_hosts"
-          $SSH remote mkdir -p ./test-upload
-          $SCP image/output/ps5-${{ matrix.distro }}.img.xz "remote:./test-upload/"
-          rm -rf "$DIR"
-
       - name: Cleanup
         if: always()
         run: rm -rf image/output meta
@@ -154,19 +136,3 @@ jobs:
           for d in ubuntu2604 arch cachyos; do
             rclone delete "r2:${{ secrets.R2_BUCKET }}/test-${d}.img.xz" -v || true
           done
-
-      - name: Clean up remote test files
-        env:
-          SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
-          SSH_CONFIG: ${{ secrets.REMOTE_SSH_CONFIG }}
-          SSH_KNOWN_HOSTS: ${{ secrets.REMOTE_SSH_KNOWN_HOSTS }}
-        run: |
-          DIR=$(mktemp -d)
-          echo "$SSH_KEY" > "$DIR/key"
-          chmod 600 "$DIR/key"
-          echo "$SSH_CONFIG" > "$DIR/config"
-          sed -i "s|~/.ssh/remote_key|$DIR/key|" "$DIR/config"
-          echo "$SSH_KNOWN_HOSTS" > "$DIR/known_hosts"
-          SSH="ssh -F $DIR/config -o UserKnownHostsFile=$DIR/known_hosts"
-          $SSH remote rm -rf ./test-upload
-          rm -rf "$DIR"
