@@ -44,6 +44,12 @@ EOF
             cp /repo/distros/${DISTRO}/kali-archive-keyring.asc "$STAGING/"
             cp /kernel-debs/*.deb                           "$STAGING/debs/"
             ;;
+        proxmox)
+            cp /repo/distros/${DISTRO}/grow-rootfs          "$STAGING/"
+            cp /repo/distros/${DISTRO}/grow-rootfs.service  "$STAGING/"
+            cp /repo/distros/${DISTRO}/proxmox-release-bookworm.gpg "$STAGING/"
+            cp /kernel-debs/*.deb                           "$STAGING/debs/"
+            ;;
         fedora)
             cp /repo/distros/${DISTRO}/grow-rootfs         "$STAGING/"
             cp /repo/distros/${DISTRO}/grow-rootfs.service "$STAGING/"

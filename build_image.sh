@@ -17,7 +17,7 @@ usage() {
     echo "Usage: $0 [--distro <distro>] [--kernel <path>] [--img-size <MB>] [--clean]"
     echo ""
     echo "Options:"
-    echo "  --distro     Distribution to build: ubuntu2604, arch, cachyos, kali, fedora, all (default: ubuntu2604)"
+    echo "  --distro     Distribution to build: ubuntu2604, arch, cachyos, kali, fedora, proxmox, all (default: ubuntu2604)"
     echo "  --kernel     Path to kernel source directory (default: auto-clone to work/linux/)"
     echo "  --img-size   Disk image size in MB (default: 12000, 32000 for --distro all, 98304 for kali)"
     echo "  --clean      Remove all cached build artifacts and start from scratch"
