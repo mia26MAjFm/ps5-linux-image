@@ -18,17 +18,30 @@ cp "$STAGING/System.map"    "$PKG/boot/System.map-$KVER"
 cp "$STAGING/.config"       "$PKG/boot/config-$KVER"
 cp -a "$STAGING/lib/modules/$KVER" "$PKG/lib/modules/"
 
-# Kernel headers (for out-of-tree module builds)
-if [ -d "$STAGING/headers" ]; then
-    # $PKG/usr may already exist from other staged files, so merge contents
-    # instead of creating a nested usr/usr/include/ directory.
+# PS5 mwifiex modprobe config + modules-load + ps5-stage-firmware
+# systemd unit, staged by build.sh into /out/staging.
+if [ -d "$STAGING/etc" ]; then
+    mkdir -p "$PKG/etc"
+    cp -a "$STAGING/etc/." "$PKG/etc/"
+fi
+# ps5-stage-firmware script lives in /usr/local/sbin (referenced by the
+# unit above). Stage that branch too.
+if [ -d "$STAGING/usr" ]; then
     mkdir -p "$PKG/usr"
-    cp -a "$STAGING/headers/usr/." "$PKG/usr/"
-    # Point /lib/modules/$KVER/build at the installed headers
-    HDR_DEST="/usr/lib/modules/$KVER/build"
+    cp -a "$STAGING/usr/." "$PKG/usr/"
+fi
+
+# Kernel headers (for out-of-tree module builds).
+# We ship them under /usr/lib/modules/<kver>/build/. The conventional Debian
+# convenience symlink /lib/modules/<kver>/build -> /usr/lib/modules/.../build
+# is intentionally NOT created here — alien's deb->rpm conversion mangles it
+# into a directory-vs-symlink conflict on rpm install. Out-of-tree builds can
+# point KERNELDIR= at /usr/lib/modules/<kver>/build/ explicitly, or recreate
+# the symlink post-install if they want the legacy path.
+if [ -d "$STAGING/headers" ]; then
+    cp -a "$STAGING/headers/usr" "$PKG/usr"
     mkdir -p "$PKG/usr/lib/modules/$KVER"
     cp -a "$STAGING/headers/lib/modules/$KVER/build" "$PKG/usr/lib/modules/$KVER/build"
-    ln -sf "$HDR_DEST" "$PKG/lib/modules/$KVER/build"
 fi
 
 cat > "$PKG/DEBIAN/control" << CTRL
@@ -48,31 +61,36 @@ set -e
 KVER="$(ls -1t /lib/modules | head -1)"
 echo ">> linux-ps5 postinst: kernel $KVER"
 
-# Rebuild initramfs
+# Rebuild initramfs (use whichever tool the host provides).
 if command -v update-initramfs >/dev/null 2>&1; then
     echo ">> Rebuilding initramfs with update-initramfs for $KVER"
     update-initramfs -c -k "$KVER"
 elif command -v mkinitcpio >/dev/null 2>&1; then
     echo ">> Rebuilding initramfs with mkinitcpio for $KVER"
     mkinitcpio -k "$KVER" -g "/boot/initrd.img-$KVER"
+elif command -v dracut >/dev/null 2>&1; then
+    echo ">> Rebuilding initramfs with dracut for $KVER"
+    dracut -f --kver "$KVER" "/boot/initrd.img-$KVER"
 elif command -v mkinitfs >/dev/null 2>&1; then
     echo ">> Rebuilding initramfs with mkinitfs for $KVER"
     mkinitfs -o "/boot/initrd.img-$KVER" "$KVER"
+else
+    echo ">> No initramfs tool found; skipping initramfs build"
 fi
 
-# Copy kernel + initrd to EFI partition
+# Copy kernel + initrd to EFI partition (only the bits that exist).
 if [ -d /boot/efi ]; then
-    OLD_BZ=$(ls -l /boot/efi/bzImage 2>/dev/null | awk '{print $5}') || true
-    OLD_INITRD=$(ls -l /boot/efi/initrd.img 2>/dev/null | awk '{print $5}') || true
-    echo ">> Copying /boot/vmlinuz-$KVER -> /boot/efi/bzImage"
-    cp "/boot/vmlinuz-$KVER" /boot/efi/bzImage
-    NEW_BZ=$(ls -l /boot/efi/bzImage | awk '{print $5}')
-    echo ">>   bzImage: ${OLD_BZ:-<new>} -> $NEW_BZ bytes"
-    echo ">> Copying /boot/initrd.img-$KVER -> /boot/efi/initrd.img"
-    cp "/boot/initrd.img-$KVER" /boot/efi/initrd.img
-    NEW_INITRD=$(ls -l /boot/efi/initrd.img | awk '{print $5}')
-    echo ">>   initrd.img: ${OLD_INITRD:-<new>} -> $NEW_INITRD bytes"
-    echo ">> Kernel $KVER deployed to /boot/efi"
+    if [ -f "/boot/vmlinuz-$KVER" ]; then
+        echo ">> Copying /boot/vmlinuz-$KVER -> /boot/efi/bzImage"
+        cp "/boot/vmlinuz-$KVER" /boot/efi/bzImage
+    fi
+    if [ -f "/boot/initrd.img-$KVER" ]; then
+        echo ">> Copying /boot/initrd.img-$KVER -> /boot/efi/initrd.img"
+        cp "/boot/initrd.img-$KVER" /boot/efi/initrd.img
+    else
+        echo ">> /boot/initrd.img-$KVER not built yet; deferring initrd copy"
+    fi
+    echo ">> Kernel $KVER files deployed (where available) to /boot/efi"
 else
     echo ">> /boot/efi not found, skipping EFI deploy"
 fi

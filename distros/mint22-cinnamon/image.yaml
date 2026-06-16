@@ -1,0 +1,222 @@
+image:
+  name: ps5-mint22-cinnamon
+  distribution: ubuntu
+  release: noble
+  description: Linux Mint 22 Cinnamon (Wilma) on Ubuntu 24.04 base
+  architecture: x86_64
+
+# Bootstrap from Ubuntu 24.04 (noble) — Mint 22 ("Wilma") is built on that base.
+# We then layer Mint's apt repo + mint-meta-cinnamon on top in post-unpack.
+source:
+  downloader: debootstrap
+  url: http://archive.ubuntu.com/ubuntu
+  variant: minbase
+  keyserver: keyserver.ubuntu.com
+  keys:
+  - 0x790BC7277767219C42C86F933B4FE6ACC0B21F32
+  - 0xf6ecb3762474eda9d21b7022871920d1991bc93c
+
+packages:
+  manager: apt
+  update: true
+  cleanup: true
+
+  repositories:
+  - name: sources.list
+    url: |-
+      deb http://archive.ubuntu.com/ubuntu {{ image.release }} main restricted universe multiverse
+      deb http://archive.ubuntu.com/ubuntu {{ image.release }}-updates main restricted universe multiverse
+      deb http://security.ubuntu.com/ubuntu {{ image.release }}-security main restricted universe multiverse
+    architectures:
+    - amd64
+
+  # kisak-mesa: newer mesa than stock Ubuntu — needed for the GFX1013 amdgpu
+  # patch ("amd/addrlib: Add more GFX1013 GPUs", mesa 26.1+) that's required
+  # for the PS5 Oberon GPU. Without it, the stock mesa shipped in {{ image.release }}
+  # lacks the addrlib entries for the PS5 ASIC and most games hit graphical
+  # glitches or black-screen on first frame. See upstream loader README §5.
+  - name: kisak-mesa.list
+    url: |-
+      deb https://ppa.launchpadcontent.net/kisak/kisak-mesa/ubuntu {{ image.release }} main
+    architectures:
+    - amd64
+    key: |
+      -----BEGIN PGP PUBLIC KEY BLOCK-----
+      Comment: Hostname: 
+      Version: Hockeypuck 2.2
+      
+      xsFNBFogVUUBEACrIr+VTDE3uQ3RcihpRKnfr+n62r+a9jQJhvzvcR5SfgQyTx75
+      5sw8aRhUzN5JnKohiOzCefxXjtHxHIRSnWona5g9qkY37fiB13Z3JOP0KaSW+K5O
+      NdBkJyp0sxNZx3ANrUIdgctm/bLZXizMfuOwr1nbIWiU0Lq7/jRtS3izjQxaqLhF
+      ZuPeFlBTZ+WTRS9n6y70LVGkwnrZVDVA4+V63pQnh0528uJAK9pG509KZMa1tZk4
+      fE74V9cg6zLXyqkQm2wwu32tK66PZg3eayg1u7dkbycnvMfJUxFjkSnrIU7P3Ivy
+      3WxNZ1mnXtN/88YFYovhz+K2RtNktyjUDyeda/dZoKaibrI9WDQNwx0JD9gEcxUt
+      ODBxmzzMWJ8I69FyOtZhRJIEI5s84EeMiEs6Ur0yfhx/gg36MOb7xjVL+kKyzVeY
+      LYG5MD1WkFsdxVbXU/5vloGhbfelMIuzvhi5YPkxjLLsVeBb4RaUujUe/WzeOMY4
+      wMtLsh3JsGkpSkG311LXXvslcOaoHkXOyD8WTnDRD53N4RJ/KkhRXit0Q0Jx1Pug
+      gOIjbrGKqqcyzYBFoVkSqCMIMQ/0vgimqzR3xrsiUfPsYHdMxulUIJayOSvPvKJQ
+      JJ3pgZ6lgdHZSPughcQSZR7tThl8WwjmSsL/j1diWPEXuSnLq9QtFYyzqwARAQAB
+      zRdMYXVuY2hwYWQgUFBBIGZvciBraXNha8LBeAQTAQIAIgUCWiBVRQIbAwYLCQgH
+      AwIGFQgCCQoLBBYCAwECHgECF4AACgkQ9j8PK5CTVDm1Jw/+KpfyKnrzaBF42lXA
+      pUdTE8kHUmyAVhAmkDyT8ceitnsIBmjy5aW5kAupMOC0rgnYL9RoungtKbausjK2
+      3DRSQCT00BjTKU1fkw2GLS3JohrNRYCQNhYIWc+UI1Vy8sIvfIOZ9P/1q9BFEz0P
+      1v9rDcNJPb6bvsBu2A5X16nSoA9V1z4yyMlYNuvME/Kh/QoTZFtFIg8hII9guWpc
+      OAlYZnAhybLVbYq0zzyUKNBJB5NDeHnW+pa9qNBHiM34RfUgmz1E3QwE1Sv8f41y
+      uYLTn08guVqjq86gjMkQGle8DOrhBSx2qRl7Na0qSgJRydyPCg4R2Ge2Ce3JsOw9
+      PBx5z5xZtDcmyY31Hkrtnl/ZqHWuv8WF60XzQpwqcoWppeZz3tDdzhr9B5tfqIja
+      bBgcO3H6So6RtVDXfn0BNJ52JD0VqjRARncFCDbzVqoUD1bMClc3FI9vZEn2qVOy
+      Gb4WEiDarf16JMjnd8R1gc9chnpRc2DD0bMXTRMmr3j+wBVV/a9jCwNJcHwMCO86
+      xOFkdstNMBLLld7/DgOzbTQGJiRfG3SYhkC9Kkf4icKiTjoZKYTQOZaya3LA2GfE
+      A7ep/y36Y6Bc40ebsVsLgbD0NEN/zmR0rTLYJYYOwhGlU/XDwK7zjRASsdblHKuC
+      H6zoaQceKWBFgk33SF8cF+SC7OA=
+      =QHxm
+      -----END PGP PUBLIC KEY BLOCK-----
+
+
+
+  # NOTE: the Mint apt repo is added by post-unpack AFTER the Mint signing
+  # keyring is installed. Declaring it here would make distrobuilder's first
+  # `apt-get update` fail signature verification before we can fetch the
+  # keyring deb.
+
+  sets:
+  - packages:
+    # Cinnamon DE from Ubuntu universe (packages.linuxmint.com is unreachable
+    # from this build network, so we can't fetch true Mint metapackages —
+    # mint-themes / mintwelcome / etc.). cinnamon-desktop-environment pulls
+    # the DE itself plus nemo, blueberry, cinnamon-screensaver — the bulk of
+    # the Mint experience without Mint's customization layer.
+    - cinnamon-desktop-environment
+    - nemo-fileroller
+    - lightdm
+    - lightdm-gtk-greeter
+    - firefox
+    - openssh-server
+    - build-essential
+    - network-manager
+    - linux-firmware
+    - initramfs-tools
+    - kmod
+    - dialog
+    - sudo
+    - nano
+    - cloud-guest-utils
+    - kexec-tools
+    - fonts-liberation
+    - fonts-dejavu
+    - fontconfig
+    - systemd-zram-generator
+    - git
+    - flex
+    - gawk
+    - bison
+    - dwarves
+    - libelf-dev
+    - libssl-dev
+    - libncurses-dev
+    - fonts-noto-cjk
+    - fonts-noto-color-emoji
+    action: install
+
+files:
+- path: /etc/hostname
+  generator: hostname
+
+- path: /etc/hosts
+  generator: hosts
+
+- path: /etc/machine-id
+  generator: dump
+
+- path: /etc/NetworkManager/conf.d/dns.conf
+  generator: copy
+  source: /tmp/build-staging/nm-dns.conf
+
+- path: /etc/kernel/postinst.d/zz-update-boot
+  generator: copy
+  source: /tmp/build-staging/zz-update-boot
+  mode: "0755"
+
+- path: /etc/fstab
+  generator: copy
+  source: /tmp/build-staging/fstab
+
+- path: /usr/local/sbin/grow-rootfs
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs
+  mode: "0755"
+
+- path: /etc/systemd/system/grow-rootfs.service
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs.service
+
+- path: /opt/debs/
+  generator: copy
+  source: /tmp/build-staging/debs
+
+actions:
+- trigger: post-unpack
+  action: |-
+    #!/bin/bash
+    set -eux
+    rm -f /var/lib/apt/lists/*InRelease /var/lib/apt/lists/*Release /var/lib/apt/lists/*Packages* || true
+    echo 'Acquire::Retries "10";' > /etc/apt/apt.conf.d/80retry
+    apt-get update
+
+- trigger: post-update
+  action: |-
+    #!/bin/bash
+    set -eux
+    passwd -l root
+
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -eux
+    fc-cache -f -v
+
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/'                /etc/ssh/sshd_config
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    systemctl enable ssh
+
+    printf '[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\n' > /etc/systemd/zram-generator.conf
+
+    # Disable Mint's first-run "Welcome" auto-launch (the screen that asks to
+    # set up snapshots, drivers, etc.). The package stays installed; the user
+    # can still launch mintwelcome manually from the menu.
+    rm -f /etc/xdg/autostart/mintwelcome.desktop 2>/dev/null || true
+
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    set -eux
+    systemctl enable grow-rootfs.service
+    systemctl enable systemd-resolved
+    systemctl enable lightdm
+    mkdir -p /boot/efi
+    rm -f /etc/kernel/postinst.d/kdump-tools
+    dpkg -i /opt/debs/*.deb
+    rm -rf /opt/debs
+    KVER=$(ls -1t /lib/modules | head -1)
+    update-initramfs -c -k "$KVER"
+    /etc/kernel/postinst.d/zz-update-boot "$KVER"
+
+    # Hold linux-ps5 against upstream replacement.
+    apt-mark hold linux-ps5 || true
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    # Pre-configure repo.etawen.dev (mia's signed kernel repo) so users get
+    # linux-ps5 updates via apt-get upgrade after first boot.
+    set -eux
+    install -d -m 755 /etc/apt/keyrings
+    curl -fsSL https://repo.etawen.dev/key.asc \
+        | gpg --dearmor -o /etc/apt/keyrings/etawen-ps5.gpg
+    chmod 644 /etc/apt/keyrings/etawen-ps5.gpg
+    cat > /etc/apt/sources.list.d/etawen-ps5.list <<EOF
+    deb [signed-by=/etc/apt/keyrings/etawen-ps5.gpg] https://repo.etawen.dev/deb ./
+    EOF
+
+
+mappings:
+  architecture_map: debian

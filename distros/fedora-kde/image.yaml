@@ -1,0 +1,274 @@
+image:
+  name: ps5-fedora-kde
+  distribution: fedora
+  release: "44"
+  description: Fedora 44 KDE Plasma desktop
+  architecture: x86_64
+
+source:
+  downloader: fedora-http
+  url: https://kojipkgs.fedoraproject.org
+  variant: Container
+
+targets:
+  lxc:
+    create_message: |
+      Welcome to {{ image.description }}
+    config:
+      - type: all
+        before: 5
+        content: |-
+          lxc.include = LXC_TEMPLATE_CONFIG/fedora.common.conf
+
+packages:
+  manager: dnf
+  update: true
+  cleanup: true
+
+  sets:
+    - packages:
+      # Desktop (KDE Plasma)
+      - plasma-desktop
+      - plasma-workspace
+      - plasma-nm
+      - plasma-pa
+      - kdeplasma-addons
+      - kde-settings-plasma
+      - konsole
+      - dolphin
+      - sddm
+      # Standard Plasma utilities — Fedora's minimal install doesn't pull
+      # most of these. Adds System Monitor, image viewer, archive manager,
+      # PDF viewer, screenshot tool, diff viewer.
+      - plasma-systemmonitor
+      - ksystemstats
+      - gwenview
+      - ark
+      - okular
+      - spectacle
+      - kdiff3
+
+      # Display / GPU
+      - mesa-vulkan-drivers
+      - mesa-dri-drivers
+      - xorg-x11-drv-amdgpu
+      - xorg-x11-server-Xorg
+
+      # Firmware (Fedora bundles AMD/Realtek/Atheros/Iwlwifi in linux-firmware)
+      - linux-firmware
+      - amd-gpu-firmware
+
+      # Audio
+      - pipewire
+      - pipewire-pulseaudio
+      - wireplumber
+      - alsa-utils
+
+      # Networking
+      - NetworkManager
+      - NetworkManager-wifi
+      - NetworkManager-tui
+      - wpa_supplicant
+
+      # System
+      - systemd
+      - systemd-resolved
+      - dbus
+      - openssh-server
+      - sudo
+      - dracut
+      - kmod
+      - kexec-tools
+      - kernel-modules
+      - kernel-modules-extra
+      - zram-generator
+      # First-boot rootfs grow (grow-rootfs.service needs both binaries)
+      - cloud-utils-growpart
+      - parted
+      # NTP — PS5's RTC is wrong on boot; without this the clock is years off
+      # and TLS handshakes fail.
+      - chrony
+
+      # Base tools
+      - bash
+      - coreutils
+      - util-linux
+      - grep
+      - sed
+      - gawk
+      - vim-minimal
+      - which
+
+      # Kernel build deps (for rebuilding if needed)
+      - make
+      - gcc
+      - kernel-headers
+      - kernel-devel
+
+      # Fonts
+      - liberation-fonts
+      - google-noto-sans-fonts
+
+      - google-noto-sans-cjk-vf-fonts
+      - google-noto-emoji-fonts
+      action: install
+
+actions:
+- trigger: post-update
+  action: |-
+    #!/bin/bash
+    set -eux
+    # Lock root; create ps5 user with sudo via wheel.
+    passwd -l root
+    useradd -m -s /bin/bash -G wheel,video,audio,input,render ps5
+    echo "ps5:ps5" | chpasswd
+    sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers || true
+
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    set -eux
+    # /opt/rpms/ was just copied in by the files: stage — now we can install.
+    mkdir -p /boot/efi
+    # Our alien-converted kernel RPM ships /usr/include/{linux,asm,rdma,...}/*
+    # which file-level-conflicts with Fedora's kernel-headers package. dnf's
+    # --allowerasing only handles package-level Obsoletes, not file conflicts.
+    # rpm -Uvh --replacefiles is the right tool: overwrite the conflicting
+    # files in place, leave kernel-headers metadata alone (Fedora's deps
+    # don't care because nothing requires the literal file paths).
+    # Fedora's kernel packages pre-create /lib/modules/<ver>/ as a real dir,
+    # but our linux-ps5 wants /lib/modules/<ver>/build to be a SYMLINK to
+    # /usr/lib/modules/.../build. rpm can't reconcile dir <-> symlink even
+    # with --replacefiles, so wipe the staged Fedora kernel tree first.
+    rm -rf /lib/modules/*
+    rpm -Uvh --replacefiles --replacepkgs --nodeps /opt/rpms/*.rpm
+    rm -rf /opt/rpms
+    KVER=$(ls -1t /lib/modules | head -1)
+    # amdgpu options — PS5's Oberon GPU needs dpm disabled or HDMI stays dark.
+    # Drop this BEFORE dracut so it lands in the initramfs.
+    mkdir -p /etc/modprobe.d
+    cat > /etc/modprobe.d/ps5-amdgpu.conf <<MODPROBE
+    options amdgpu dpm=0 gpu_recovery=0
+    MODPROBE
+    # cyan_skillfish (PS5 Oberon) GPU firmware must be uncompressed before
+    # dracut packs the initramfs. The linux-ps5 amdgpu patches write into
+    # the request_firmware() buffer to skip Sony's signature header
+    # (gfx_v10_0_early_init + amdgpu_sdma_init_microcode). Firmware loaded
+    # from .xz decompresses into pages mapped PAGE_KERNEL_RO, so the write
+    # oopses amdgpu at gfx_v10_0_early_init+0x415 and /dev/dri never
+    # appears. Distros with .zst (arch) or raw .bin (debian) decompress
+    # into writable buffers and are unaffected; Fedora ships .xz, so it
+    # gets a special-case here.
+    # linux-firmware dedupes blobs as symlinks (mec2 -> mec) and unxz
+    # refuses symlinks, so materialize the targets first.
+    # Upstream (github.com/ps5-linux/ps5-linux-image@ed54e99) ships the
+    # same fix.
+    (
+        cd /usr/lib/firmware/amdgpu
+        for f in cyan_skillfish*.xz; do
+            if [ -L "$f" ]; then
+                tgt=$(readlink -f "$f")
+                rm "$f"
+                xz -dc "$tgt" > "${f%.xz}"
+            fi
+        done
+        unxz cyan_skillfish*.xz
+    )
+    # Explicit initrd path so zz-update-boot finds /boot/initrd.img-$KVER.
+    dracut -f --kver "$KVER" "/boot/initrd.img-$KVER"
+    /etc/kernel/postinst.d/zz-update-boot "$KVER"
+
+    systemctl enable grow-rootfs.service || true
+    systemctl enable systemd-resolved
+    # NTP. Fedora ships chrony as the default NTP client; enable it so the
+    # PS5's empty/wrong RTC doesn't leave the clock years off (which breaks
+    # TLS and most package operations).
+    systemctl enable chronyd || true
+    # Virtual terminals. Fedora's preset enables getty@tty1 only; tie F2..F6
+    # in by hand so Ctrl+Alt+F2..F6 give real text consoles.
+    for n in 2 3 4 5 6; do
+        systemctl enable getty@tty${n}.service 2>/dev/null || true
+    done
+    # Defer /etc/resolv.conf symlink to boot — bind-mounted during build.
+    mkdir -p /etc/tmpfiles.d
+    printf 'L+ /etc/resolv.conf - - - - /run/systemd/resolve/stub-resolv.conf\n' \
+        > /etc/tmpfiles.d/resolv-conf.conf
+
+    # SDDM autologin (KDE Plasma)
+    mkdir -p /etc/sddm.conf.d
+    cat > /etc/sddm.conf.d/autologin.conf <<SDDM
+    [Autologin]
+    User=ps5
+    Session=plasma
+    SDDM
+    systemctl enable sddm
+
+    # NetworkManager
+    systemctl enable NetworkManager
+
+    # SSH config
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    systemctl enable sshd
+
+    # zram swap
+    if command -v zram-generator >/dev/null 2>&1; then
+        printf '[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\n' > /etc/systemd/zram-generator.conf
+    fi
+
+    # versionlock the PS5 kernel so `dnf upgrade` doesn't replace it.
+    dnf install -y python3-dnf-plugin-versionlock
+    dnf versionlock add linux-ps5 || true
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    # Pre-configure repo.etawen.dev (mia's signed kernel repo) so users get
+    # linux-ps5 updates via dnf upgrade after first boot. Per-package gpgcheck
+    # is off because alien-converted RPMs are not per-package signed; the
+    # repodata IS signed (repo_gpgcheck=1).
+    set -eux
+    cat > /etc/yum.repos.d/etawen-ps5.repo <<EOF
+    [etawen-ps5]
+    name=Etawen PS5 kernel repo
+    baseurl=https://repo.etawen.dev/rpm/
+    enabled=1
+    gpgcheck=0
+    repo_gpgcheck=1
+    gpgkey=https://repo.etawen.dev/key.asc
+    EOF
+
+
+files:
+- name: hostname
+  path: /etc/hostname
+  generator: hostname
+
+- name: hosts
+  path: /etc/hosts
+  generator: hosts
+
+# kernel postinst that updates the EFI boot bits — shared across deb-based distros.
+- path: /etc/kernel/postinst.d/zz-update-boot
+  generator: copy
+  source: /tmp/build-staging/zz-update-boot
+  mode: "0755"
+
+# NetworkManager DNS handover to systemd-resolved.
+- path: /etc/NetworkManager/conf.d/10-dns.conf
+  generator: copy
+  source: /tmp/build-staging/nm-dns.conf
+
+# Filesystem grow on first boot.
+- path: /usr/local/sbin/grow-rootfs
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs
+  mode: "0755"
+
+- path: /etc/systemd/system/grow-rootfs.service
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs.service
+
+# Kernel RPMs staged into the chroot for the post-update dnf install.
+- path: /opt/rpms/
+  generator: copy
+  source: /tmp/build-staging/rpms

@@ -1,0 +1,13 @@
+[Unit]
+Description=Grow root filesystem to fill disk
+DefaultDependencies=no
+Before=local-fs-pre.target
+After=systemd-remount-fs.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/grow-rootfs
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

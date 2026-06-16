@@ -9,21 +9,22 @@ KERNEL_SRC=""
 CLEAN=false
 IMG_SIZE=12000
 KERNEL_ONLY=false
-PATCHES_REF="v1.3"
+PATCHES_REF="kernel-7.0.10-e00c8a7"
+MWIFIEX_REF="5cfd063449f27e2f8a7d17c814a3bb21c27aa903"
 
-MULTI_DISTROS="ubuntu2604 arch cachyos"
+MULTI_DISTROS="ubuntu2604 debian13 arch alpine cachyos"
 
 usage() {
     echo "Usage: $0 [--distro <distro>] [--kernel <path>] [--img-size <MB>] [--clean]"
     echo ""
     echo "Options:"
-    echo "  --distro     Distribution to build: ubuntu2604, arch, cachyos, kali, fedora, proxmox, debian, all (default: ubuntu2604)"
+    echo "  --distro     Distribution to build: ubuntu2604, debian13, devuan-sway, artix-openrc, artix-runit, artix-hyprland-lightcrimson, arch, cachyos, miaos, alpine, all (default: ubuntu2604)"
     echo "  --kernel     Path to kernel source directory (default: auto-clone to work/linux/)"
-    echo "  --img-size   Disk image size in MB (default: 12000, 32000 for --distro all, 98304 for kali)"
+    echo "  --img-size   Disk image size in MB (default: 12000, 32000 for --distro all)"
     echo "  --clean      Remove all cached build artifacts and start from scratch"
     echo "  --clean-only Remove all cached build artifacts and exit"
     echo "  --kernel-only  Build and package the kernel only, then exit"
-    echo "  --patches-ref  Branch, tag, or commit SHA for patches (default: v1.2)"
+    echo "  --patches-ref  Branch, tag, or commit SHA for patches (default: v1.0)"
     exit 1
 }
 
@@ -64,12 +65,49 @@ DOCKER_NAME="ps5-build-$$"
 if [ "$DISTRO" = "all" ] && [ "$IMG_SIZE" = "12000" ]; then
     IMG_SIZE=32000
 fi
-if [ "$DISTRO" = "kali" ] && [ "$IMG_SIZE" = "12000" ]; then
-    IMG_SIZE=98304
-fi
+
+# Bazzite assembles the OCI rootfs + an embedded /sysroot/ostree/repo/objects
+# (deduplicated copy of the same content) + the linux-ps5 kernel — 12GB is
+# not enough. Bump the default for any bazzite* target.
+case "$DISTRO" in
+    bazzite*)
+        if [ "$IMG_SIZE" = "12000" ]; then
+            IMG_SIZE=24000
+        fi
+        ;;
+    # Batocera unsquashes to ~6GB; 12GB is tight once kernel + initrd +
+    # /userdata defaults are added. Bump to 16GB.
+    batocera*)
+        if [ "$IMG_SIZE" = "12000" ]; then
+            IMG_SIZE=16000
+        fi
+        ;;
+    # Gaming image: Arch base + gamescope + Steam + lib32 stack. Steam is
+    # ~2 GB and dual 32/64-bit Mesa/Vulkan adds another ~1 GB. Bump from
+    # 12 -> 16 GB so there's headroom for a game.
+    miaos*)
+        if [ "$IMG_SIZE" = "12000" ]; then
+            IMG_SIZE=16000
+        fi
+        ;;
+    # Pre-riced Hyprland: Artix base + Hyprland stack + ML4W base
+    # dotfiles + lightcrimson overlay + nerd fonts + GTK/Qt themes
+    # add ~1.5 GB on top of the bare artix-runit footprint. Bump to
+    # 16 GB so there's room left for user data.
+    artix-hyprland-lightcrimson)
+        if [ "$IMG_SIZE" = "12000" ]; then
+            IMG_SIZE=16000
+        fi
+        ;;
+esac
 
 if [ -z "$FORMAT" ]; then
-    case "$DISTRO" in arch|cachyos) FORMAT="arch" ;; fedora) FORMAT="rpm" ;; all) FORMAT="all" ;; *) FORMAT="deb" ;; esac
+    case "$DISTRO" in
+        arch|cachyos|miaos*|artix*) FORMAT="arch" ;;
+        fedora*|bazzite*)        FORMAT="rpm" ;;
+        all)                     FORMAT="all" ;;
+        *)                       FORMAT="deb" ;;
+    esac
 fi
 
 KERNEL_BUILDER_PLATFORM="linux/amd64"
@@ -109,7 +147,9 @@ SKIP_CHROOT=false
 
 case "$FORMAT" in
     arch) ls "$KERNEL_OUT"/*.pkg.tar.zst 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
-    rpm)  ls "$KERNEL_OUT"/*.rpm 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
+    # rpm uses alien to convert from .deb — only the .deb needs to exist
+    # to skip the kernel build; the alien step runs separately below.
+    rpm)  ls "$KERNEL_OUT"/*.deb 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
     all)  ls "$KERNEL_OUT"/*.deb 1>/dev/null 2>&1 && \
           ls "$KERNEL_OUT"/*.pkg.tar.zst 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
     *)    ls "$KERNEL_OUT"/*.deb 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
@@ -234,6 +274,34 @@ if [ "$DISTRO" = "all" ]; then
 fi
 
 # --- Step 1: Kernel ---
+# When work/linux is a symlink to a shared persistent cache (as the CI
+# workflow sets up), multiple distro builds running in parallel on the
+# same host all race to clone/patch/mv that shared dir. Wrap the kernel
+# source + build stages in a flock so only one builds at a time; the
+# others wait, then re-check SKIP_KERNEL (now true because kernel-out
+# is populated by the winner) and fall straight through to image-build.
+#
+# Lock on the RESOLVED kernel-out path so symlinked per-task workspaces
+# all serialize on the same lock file. Without readlink -f the lock
+# file would live inside each task's workspace and serialize nothing.
+KERNEL_LOCK="$(readlink -f "$KERNEL_OUT" 2>/dev/null || echo "$KERNEL_OUT").lock"
+mkdir -p "$(dirname "$KERNEL_LOCK")"
+exec 9>"$KERNEL_LOCK"
+echo "  acquiring kernel-build lock: $KERNEL_LOCK"
+flock 9
+echo "  acquired"
+
+# Re-evaluate SKIP_KERNEL inside the lock: if another task built the
+# kernel while we were waiting, kernel-out is now populated and we
+# should skip our own build.
+case "$FORMAT" in
+    arch) ls "$KERNEL_OUT"/*.pkg.tar.zst 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
+    rpm)  ls "$KERNEL_OUT"/*.deb 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
+    all)  ls "$KERNEL_OUT"/*.deb 1>/dev/null 2>&1 && \
+          ls "$KERNEL_OUT"/*.pkg.tar.zst 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
+    *)    ls "$KERNEL_OUT"/*.deb 1>/dev/null 2>&1 && SKIP_KERNEL=true ;;
+esac
+
 if [ "$SKIP_KERNEL" = true ]; then
     printf "  ✓ %-60s\n" "Kernel packages (cached)"
 else
@@ -266,12 +334,25 @@ else
             [ ${#patches[@]} -eq 0 ] && { echo "No .patch files found in '"$PATCHES_DIR"'"; exit 1; }
             for p in "${patches[@]}"; do
                 echo "Applying $p"
-                git -C "'"$LINUX_TMP_DIR"'" apply --exclude=Makefile "$p"
+                # --recount makes git ignore hunk-header line numbers and
+                # recount from content. Lets us land patches whose first
+                # hunk grew without manually fixing every later @@ offset.
+                git -C "'"$LINUX_TMP_DIR"'" apply --recount --exclude=Makefile "$p"
             done'
 
         run_stage "Copy kernel config" \
             cp "$PATCHES_DIR/.config" "$LINUX_TMP_DIR/.config"
 
+        # Make sure the destination is gone before we rename into it. If
+        # $LINUX_DEFAULT_DIR still exists (stale state from a previous run,
+        # interrupted task, or a runner that reused this workspace), a
+        # plain `mv linux.tmp linux` moves the source INTO linux/, and if
+        # linux/linux.tmp also exists from an earlier partial run it errors
+        # with "cannot overwrite linux/linux.tmp: Directory not empty".
+        # The docker-alpine-rm guard at the top of this block only fires
+        # when the dir exists at script start; this catches the case where
+        # the dir reappears mid-run (cache mount races, prior task leftover).
+        [ -e "$LINUX_DEFAULT_DIR" ] && rm -rf "$LINUX_DEFAULT_DIR"
         mv "$LINUX_TMP_DIR" "$LINUX_DEFAULT_DIR"
         KERNEL_SRC="$LINUX_DEFAULT_DIR"
     else
@@ -280,7 +361,17 @@ else
 
     KERNEL_SRC="$(cd "$KERNEL_SRC" && pwd)"
 
-    rm -f "$KERNEL_OUT"/*.deb "$KERNEL_OUT"/*.pkg.tar.zst "$KERNEL_OUT"/*.rpm
+    # Wipe ONLY the format we're about to rebuild. Wiping every format
+    # (which the older code did) races against parallel matrix jobs on the
+    # same runner: e.g. an arch build would delete .deb artifacts that a
+    # concurrent ubuntu image-build is mid-way through using, surfacing as
+    # `cp /kernel-debs/*.deb: No such file or directory` in the loser.
+    case "$FORMAT" in
+        deb)  rm -f "$KERNEL_OUT"/*.deb ;;
+        rpm)  rm -f "$KERNEL_OUT"/*.deb "$KERNEL_OUT"/*.rpm ;;
+        arch) rm -f "$KERNEL_OUT"/*.pkg.tar.zst ;;
+        all)  rm -f "$KERNEL_OUT"/*.deb "$KERNEL_OUT"/*.rpm "$KERNEL_OUT"/*.pkg.tar.zst ;;
+    esac
 
     run_stage "Build kernel builder image" \
         docker build --platform "$KERNEL_BUILDER_PLATFORM" -t ps5-kernel-builder \
@@ -288,6 +379,7 @@ else
 
     run_stage "Compile kernel" \
         docker run --rm --platform "$KERNEL_BUILDER_PLATFORM" --name "$DOCKER_NAME" \
+            -e MWIFIEX_REF="$MWIFIEX_REF" \
             -v "$KERNEL_SRC":/src \
             -v "$KERNEL_OUT":/out \
             -v "$CCACHE_DIR":/ccache \
@@ -295,7 +387,8 @@ else
 
     ls "$KERNEL_OUT/staging/lib/modules/" | head -1 > "$KERNEL_OUT/VERSION"
 
-    case "$FORMAT" in deb|all)
+    case "$FORMAT" in deb|rpm|all)
+        # RPM is built from the .deb via alien — so deb is always built first.
         run_stage "Package kernel (.deb)" \
             docker run --rm --platform "$KERNEL_BUILDER_PLATFORM" --name "$DOCKER_NAME" \
                 -v "$KERNEL_SRC":/src \
@@ -303,6 +396,14 @@ else
                 -v "$CCACHE_DIR":/ccache \
                 ps5-kernel-builder \
                 /package-deb.sh
+    esac
+
+    case "$FORMAT" in rpm|all)
+        run_stage "Package kernel (.rpm)" \
+            docker run --rm --platform "$KERNEL_BUILDER_PLATFORM" --name "$DOCKER_NAME" \
+                -v "$KERNEL_OUT":/out \
+                ps5-kernel-builder \
+                /package-rpm.sh
     esac
 
     case "$FORMAT" in arch|all)
@@ -314,17 +415,29 @@ else
                 -v "$KERNEL_OUT":/out \
                 ps5-kernel-packager-arch
     esac
-
-    case "$FORMAT" in rpm)
-        run_stage "Build rpm packager image" \
-            docker build -t ps5-kernel-packager-rpm \
-                -f "$SCRIPT_DIR/docker/kernel-builder-rpm/Dockerfile" "$SCRIPT_DIR"
-        run_stage "Package kernel (.rpm)" \
-            docker run --rm --name "$DOCKER_NAME" \
-                -v "$KERNEL_OUT":/out \
-                ps5-kernel-packager-rpm
-    esac
 fi
+
+# Alien .deb -> .rpm runs OUTSIDE the SKIP_KERNEL block: even when the kernel
+# build was skipped, the persistent cache may only have the .deb (e.g. last
+# build was for a deb-based distro), and the next distro needs the .rpm.
+case "$FORMAT" in
+    rpm|all)
+        # Two parallel builds (capacity > 1 on the runner) might both find the
+        # .rpm missing and race the alien conversion. Serialize via flock and
+        # re-check inside the lock so the loser just no-ops.
+        if ! ls "$KERNEL_OUT"/*.rpm 1>/dev/null 2>&1; then
+            run_stage "Convert kernel .deb -> .rpm (alien)" \
+                flock "$KERNEL_OUT/.alien.lock" sh -c "
+                    if ! ls \"$KERNEL_OUT\"/*.rpm 1>/dev/null 2>&1; then
+                        docker run --rm --platform \"$KERNEL_BUILDER_PLATFORM\" --name \"$DOCKER_NAME\" \
+                            -v \"$KERNEL_OUT\":/out \
+                            ps5-kernel-builder \
+                            /package-rpm.sh
+                    fi
+                "
+        fi
+        ;;
+esac
 
 if [ "$KERNEL_ONLY" = true ]; then
     KVER=$(cat "$KERNEL_OUT/VERSION" 2>/dev/null || echo "unknown")
@@ -332,6 +445,11 @@ if [ "$KERNEL_ONLY" = true ]; then
     echo "Done! Kernel $KVER packages in $KERNEL_OUT/"
     exit 0
 fi
+
+# Release the kernel-build lock: from here on each task does its own
+# image build (chroot, image-builder docker) on per-task paths, so
+# parallel tasks can resume.
+exec 9>&-
 
 # --- Step 2: Build distribution image ---
 run_stage "Build image builder image" \

@@ -25,4 +25,4 @@ exec /usr/bin/gamescope \
     --prefer-output DP-1 \
     --sdr-gamut-wideness 0 \
     -- \
-    /usr/bin/steam -gamepadui -steamos3
+    /usr/bin/steam -gamepadui

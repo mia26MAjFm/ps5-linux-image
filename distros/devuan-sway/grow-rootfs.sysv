@@ -1,0 +1,28 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          grow-rootfs
+# Required-Start:    $local_fs
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: Grow rootfs to fill disk on first boot
+# Description:       One-shot: resize the root partition + filesystem
+#                    to fill the underlying disk, then remove itself
+#                    from rc.d via update-rc.d.
+### END INIT INFO
+
+case "$1" in
+    start)
+        echo "Growing root filesystem..."
+        /usr/local/sbin/grow-rootfs
+        ;;
+    stop|restart|force-reload|status)
+        # No-op — grow-rootfs is a one-shot.
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2
+        exit 3
+        ;;
+esac
+
+exit 0

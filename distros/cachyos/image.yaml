@@ -186,12 +186,8 @@ actions:
     # Enable #[multilib] / #Include block (\\\\ in YAML would break the sed address regex)
     sed -i '/^#\[multilib\]/,/^#Include/s/^#//' /etc/pacman.conf
 
-    # Keep CI on a small stable mirror set. The full active global list can
-    # select slow mirrors and fail pacman's low-speed download timeout.
-    cat > /etc/pacman.d/mirrorlist <<'EOF'
-    Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
-    Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch
-    EOF
+    curl -fsSL "https://archlinux.org/mirrorlist/?country=all&protocol=https&use_mirror_status=on" \
+      | sed 's/^#Server/Server/' > /etc/pacman.d/mirrorlist
 
     pacman -Syy --noconfirm
 
@@ -202,6 +198,24 @@ actions:
     set -eux
     # fc-cache / systemctl can SIGSEGV under QEMU when image plat is linux/amd64 on arm64 hosts.
     fc-cache -f 2>/dev/null || true
+
+    # Ensure gcc-libs / libstdc++ are at the same version as the gamescope
+    # and Steam binaries shipped by cachyos/arch. CachyOS publishes
+    # gamescope linked against the newest libstdc++.so.6 (GLIBCXX_3.4.35+)
+    # but the bootstrap pacman -S step often resolves an older gcc-libs
+    # snapshot during the image build, producing a "GLIBCXX_3.4.35 not
+    # found" runtime error and a tty1 respawn loop on first boot.
+    #
+    # Force-refresh just these two (plus their lib32 counterparts) without
+    # doing a full -Syu, which would pull in CachyOS *-v3 glibc/pacman
+    # variants that break QEMU image-build hooks.
+    pacman -Syy --noconfirm
+    # Drop --needed and lib32-libstdc++: --needed makes pacman skip when the
+    # bootstrap snapshot is "already installed" (even if older), which is
+    # exactly the case we are trying to defeat. lib32-libstdc++ does not
+    # exist as a separate Arch package; lib32-gcc-libs provides libstdc++.
+    pacman -S --noconfirm gcc-libs libstdc++ lib32-gcc-libs || true
+
 
     symlink_wants() {
       local src=$1
@@ -230,7 +244,7 @@ actions:
     ln -sf /etc/systemd/system/grow-rootfs.service \
       /etc/systemd/system/local-fs.target.wants/grow-rootfs.service
 
-    # Stub out steamos-update so Steam's -steamos3 OOBE skips the SteamOS OTA
+    # Stub out steamos-update so Steam's OOBE skips the SteamOS OTA
     # step cleanly. Exit 7 = "no update available" per Valve's convention.
     printf '#!/bin/bash\n# Stub: no SteamOS OTA on this image\nexit 7\n' \
       > /usr/bin/steamos-update
@@ -338,6 +352,28 @@ actions:
 
     mkdir -p /boot/efi
     /etc/kernel/postinst.d/zz-update-boot
+
+    # IgnorePkg keeps `pacman -Syu` from replacing our patched linux-ps5
+    # kernel with the CachyOS stock kernel.
+    sed -i '/^IgnorePkg/d' /etc/pacman.conf
+    echo 'IgnorePkg = linux-ps5' >> /etc/pacman.conf
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    # Pre-configure repo.etawen.dev (mia's signed kernel repo) so users get
+    # linux-ps5 updates via pacman -Syu after first boot.
+    set -eux
+    curl -fsSL https://repo.etawen.dev/key.asc | pacman-key --add -
+    pacman-key --lsign-key E40FB2409C9AD5243762294293AB12C4159FEDAB
+    if ! grep -q "^\[ps5\]" /etc/pacman.conf; then
+        cat >> /etc/pacman.conf <<EOF
+
+    [ps5]
+    SigLevel = Required DatabaseRequired
+    Server = https://repo.etawen.dev/arch
+    EOF
+    fi
+
 
 mappings:
   architecture_map: archlinux

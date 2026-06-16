@@ -1,0 +1,71 @@
+name: Try Distros (verification)
+run-name: Try ${{ inputs.distro }} build
+
+# Verifies that bazzite / bazzite-deck / batocera images build cleanly under
+# a GitHub Actions workflow before we upstream the change.  Runs only on the
+# fastnet self-hosted runner because the build needs ~30 GB scratch +
+# nested docker (distrobuilder / umoci / skopeo) which github-hosted
+# runners can't provide.
+
+on:
+  workflow_dispatch:
+    inputs:
+      distro:
+        description: 'Distro to verify'
+        default: 'batocera'
+        type: choice
+        options: [bazzite, bazzite-deck, batocera]
+
+jobs:
+  build:
+    runs-on: [self-hosted, fastnet, ps5-builder]
+    timeout-minutes: 240
+    permissions:
+      contents: write
+
+    steps:
+      - name: Clean workspace
+        run: |
+          set -euo pipefail
+          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ "$GITHUB_WORKSPACE" = "/" ]; then
+            echo "Invalid GITHUB_WORKSPACE" >&2
+            exit 1
+          fi
+          sudo rm -rf "$GITHUB_WORKSPACE/image"
+
+      - name: Checkout image builder
+        uses: actions/checkout@v4
+        with:
+          path: image
+
+      - name: Build ${{ inputs.distro }} image
+        run: |
+          set -u
+          DISTRO="${{ inputs.distro }}"
+          echo "::group::build $DISTRO"
+          bash image/build_image.sh --distro "$DISTRO"
+          echo "::endgroup::"
+
+      - name: Show artifact info
+        if: always()
+        run: |
+          set +e
+          ls -lh image/output/ 2>/dev/null || true
+          # Compute a sha256 + size of the compressed image if it exists, no
+          # upload (we're verifying the build, not publishing yet)
+          for f in image/output/ps5-${{ inputs.distro }}.img image/output/ps5-${{ inputs.distro }}.img.xz; do
+              if [ -f "$f" ]; then
+                  echo "  $f"
+                  ls -la "$f"
+                  sha256sum "$f"
+              fi
+          done
+
+      - name: Upload to workflow run as artifact (optional, fork-only)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps5-${{ inputs.distro }}-img
+          path: image/output/ps5-${{ inputs.distro }}.img.xz
+          if-no-files-found: warn
+          retention-days: 3

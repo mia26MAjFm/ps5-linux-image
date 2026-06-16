@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
+  "packages": [
+    "mtools@latest",
+    "util-linux@latest",
+    "e2fsprogs@latest",
+    "qemu@9.2.3"
+  ],
+  "shell": {
+    "init_hook": [
+      "printf '\\n\\033[1;35mPS5 Linux image devbox\\033[0m  \\033[2m(qemu pinned to 9.2.3: newer 10/11 builds hit an io_uring startup failure)\\033[0m\\n'",
+      "printf '\\n'",
+      "./tools/devbox-image list --inline",
+      "printf '\\n'",
+      "printf '  \\033[1;36mBuild\\033[0m   devbox run build <distro>      \\033[2m# minutes cached, longer cold\\033[0m\\n'",
+      "printf '  \\033[1;32mCheck\\033[0m   devbox run check <distro>      \\033[2m# image structure; usually <10s\\033[0m\\n'",
+      "printf '  \\033[1;33mSmoke\\033[0m   devbox run smoke <distro>      \\033[2m# QEMU USB-root to systemd; usually <1m\\033[0m\\n'",
+      "printf '  \\033[1;34mAll\\033[0m     devbox run validate <distro>   \\033[2m# check + smoke; usually <1m\\033[0m\\n\\n'"
+    ],
+    "scripts": {
+      "distros": [
+        "./tools/devbox-image distros \"$@\""
+      ],
+      "build": [
+        "./tools/devbox-image build \"$@\""
+      ],
+      "check": [
+        "./tools/devbox-image check \"$@\""
+      ],
+      "smoke": [
+        "./tools/devbox-image smoke \"$@\""
+      ],
+      "validate": [
+        "./tools/devbox-image validate \"$@\""
+      ]
+    }
+  }
+}

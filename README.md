@@ -1,13 +1,44 @@
 # PS5 Linux Image Builder
 
-Builds bootable Linux USB images for PlayStation 5 using Docker containers. Supports Ubuntu 26.04, Arch, CachyOS (Gamescope + Steam), Fedora (GNOME), and full Kali Linux, individually or as a multi-distro image with kexec switching.
+Fork of [ps5-linux/ps5-linux-image](https://github.com/ps5-linux/ps5-linux-image) with more distros and [prebuilt images](https://git.etawen.dev/mia/ps5-linux-image/releases/tag/latest).
+
+Builds bootable Linux USB images for PlayStation 5 using Docker containers. Each image ships the linux-ps5 kernel with the patches from [`mia/ps5-linux-patches`](https://git.etawen.dev/mia/ps5-linux-patches), the mwifiex driver for the IW620 WLAN/BT module, and per-distro PS5 setup (kexec loader entry, growpart on first boot, NetworkManager, etc).
+
+## Prebuilt images
+
+Pre-built `.img.xz` files for every distro below are published on the [`latest`](https://git.etawen.dev/mia/ps5-linux-image/releases/tag/latest) release. Just `xz -d` and `dd` — no local build required.
+
+## Distributions
+
+| Distro | Default session | Pkg fmt | Notes |
+|---|---|---|---|
+| Ubuntu 26.04 (Resolute) | GNOME | `.deb` | systemd, NetworkManager |
+| Debian 13 (Trixie) — XFCE | XFCE | `.deb` | lightweight desktop |
+| Debian 13 (Trixie) — GNOME | GNOME | `.deb` | full GNOME stack |
+| Debian 13 (Trixie) — KDE | KDE Plasma | `.deb` | full KDE stack |
+| Debian 13 (Trixie) — Server | tty1 autologin | `.deb` | headless, no DE |
+| Debian 13 + Proxmox VE 9 | Proxmox web UI | `.deb` | KVM/LXC, pinned Debian kernel replaced with linux-ps5 |
+| Arch | Sway | `.pkg.tar.zst` | rolling |
+| CachyOS | Gamescope + Steam Big Picture | `.pkg.tar.zst` | Arch + `[cachyos]` repo |
+| Alpine 3.21 | OpenRC tty | extracted `.deb` | musl, minimal |
+| Fedora 44 — GNOME | GNOME | `.rpm` | latest Fedora |
+| Fedora 44 — KDE Plasma | KDE Plasma | `.rpm` | Mesa 26.1 (PS5 GFX1013 fix) when available |
+| **Bazzite** | KDE Plasma | OCI atomic | ublue-os gaming-focused Fedora |
+| **Bazzite-Deck** | gamescope-session-plus | OCI atomic | Steam-Deck UI variant of Bazzite |
+| **Batocera** | EmulationStation | squashfs | retro emulation distro (RetroArch + dozens of emulators) |
+
+Default credentials on every image: user `ps5` / password `ps5` (sudo enabled, root locked). CachyOS uses `steam` / `steam`. Bazzite-Deck boots straight into the gamescope session.
+
+### Batocera notes
+
+- **Exit-game hotkey**: `Share` + `PS` on the DualSense (the in-game combo for "quit emulator"). Other Batocera combos use the PS button as the hotkey modifier.
+- Bundled emulators (Batocera 43): PSP (PPSSPP), PS1 (DuckStation), PS2 (PCSX2), PS3 (RPCS3), PS4 (shadPS4), Switch (Ryujinx — Yuzu was DMCA'd in 2024 and removed from every distro), plus the standard retroarch lineup (NES/SNES/Genesis/N64/GameCube/Wii/etc).
+- A system only appears in EmulationStation when it has at least one ROM under `/userdata/roms/<system>/`. Drop one file per system or set `display.empty=1` in `/userdata/system/batocera.conf` to force them all visible.
 
 ## Prerequisites
 
 - Docker (with permission to run `--privileged` containers) — install as per your distro's instructions
-- ~30GB free disk space for Ubuntu, Arch, or CachyOS; a full Kali build needs
-  substantial working space because it creates a 96GB image and a full rootfs
-  tree (`~150GB` free recommended for a clean Kali build)
+- ~30 GB free disk space (more for `--distro all` or Bazzite/Bazzite-Deck/Batocera: ~50 GB)
 
 Once Docker is installed, add your user to the docker group and apply it without logging out:
 
@@ -19,27 +50,17 @@ newgrp docker
 ## Quick Start
 
 ```bash
-# Build a single Ubuntu 26.04 image
-./build_image.sh --distro ubuntu2604
+# Build a single distro
+./build_image.sh --distro ubuntu2604           # default
+./build_image.sh --distro debian13-kde
+./build_image.sh --distro debian13-proxmox
+./build_image.sh --distro fedora-kde
+./build_image.sh --distro bazzite
+./build_image.sh --distro bazzite-deck
+./build_image.sh --distro batocera
+./build_image.sh --distro cachyos              # gamescope + Steam Big Picture
 
-OR
-
-# Build CachyOS (Arch-based, Gamescope + Steam Big Picture)
-./build_image.sh --distro cachyos
-
-OR
-
-# Build Kali Linux (XFCE + kali-linux-everything)
-./build_image.sh --distro kali
-
-OR
-
-# Build Fedora (GNOME desktop)
-./build_image.sh --distro fedora
-
-OR
-
-# Build a multi-distro image (ubuntu2604 + arch + cachyos)
+# Multi-distro image (legacy: ubuntu2604 + debian13 + arch + alpine + cachyos)
 ./build_image.sh --distro all
 ```
 
@@ -48,151 +69,54 @@ The script auto-clones the kernel source, applies PS5 patches, compiles, and bui
 ## Flash to USB
 
 ```bash
-sudo dd if=output/ps5-ubuntu2604.img of=/dev/sdX bs=4M status=progress
+xz -dk output/ps5-debian13-kde.img.xz                                # if you grabbed from releases
+sudo dd if=output/ps5-debian13-kde.img of=/dev/sdX bs=4M status=progress
 ```
 
-## Kali First Boot Time Sync
-
-The Kali image uses UTC by default and enables `ntpsec`. PS5 hardware may boot
-Linux without a correct real-time clock, so the displayed time can be wrong
-until a network connection is available. The Kali recipe configures IPv4 NTP
-sources that were validated through Android USB tethering, because that
-connection may not provide usable IPv6 routing.
-
-The Xfce clock's **Time and Date** window is the legacy `time-admin` utility.
-On Kali it can report that NTP support is not installed even though `ntpsec`
-is installed and active. Verify or repair synchronization from a terminal:
-
-```bash
-systemctl --no-pager status ntpsec
-ntpq -pn
-timedatectl status
-```
-
-If the PS5 clock is still wrong after the internet connection is active, force
-one initial correction and restart continuous synchronization:
-
-```bash
-sudo systemctl stop ntpsec
-sudo ntpd -gq -c /etc/ntpsec/ntp.conf
-sudo systemctl start ntpsec
-date
-```
-
-To use a local timezone after boot, for example Kentucky:
-
-```bash
-sudo timedatectl set-timezone America/Kentucky/Louisville
-timedatectl status
-```
-
-## Kali Internal WiFi
-
-The Kali image builds and installs the PS5 IW620 `mwifiex` modules for the
-PS5-patched kernel. On boot, `ps5-iw620.service` copies the console-specific
-firmware dumped by `ps5-linux-loader` from `/boot/efi/lib/nxp/` into
-`/lib/firmware/nxp/`, loads the driver, and enables WiFi radio. If the firmware
-payload is present, NetworkManager should expose the internal interface as
-`mlan0` and the Xfce network applet can be used to scan and connect.
-
-The Kali desktop autologin is enabled for local first boot. SSH is installed
-but disabled by default because the initial local account is `kali` with
-password `kali`. Before enabling remote access, change that password:
-
-```bash
-passwd
-sudo systemctl enable --now ssh
-```
-
-The image holds its installed kernel packages and protects the boot-copy hook
-from deploying a generic Kali kernel. Do not replace or unhold the PS5 kernel
-unless you are intentionally testing a new PS5-patched kernel build.
-
-Ghidra is configured to use JDK 21, its documented supported runtime. Full
-Kali installations may also contain newer Java versions for other software.
-
-`kali-linux-everything` installs NFS client components, but the PS5-patched
-kernel has NFS disabled. A failed `run-rpc_pipefs.mount` unit can therefore be
-reported at boot; it only indicates that NFS mounts are unavailable. The Kali
-desktop and security tools are unaffected.
-
-The full Kali toolset also enables `chkrootkit.timer`; its daily integrity scan
-can use noticeable CPU time while it runs.
+After flashing, on first boot the rootfs auto-expands to fill the USB drive (see the `grow-rootfs` service in each distro's directory).
 
 ## Options
 
 | Flag | Description | Default |
-|------|-------------|---------|
-| `--distro` | `ubuntu2604`, `arch`, `cachyos`, `kali`, `fedora`, or `all` | `ubuntu2604` |
-| `--kernel` | Path to kernel source directory | auto-clone version selected by PS5 patch set |
-| `--img-size` | Disk image size in MB | `12000` (`32000` for `all`, `98304` for `kali`) |
+|---|---|---|
+| `--distro` | Any value from the [distros table](#distributions), or `all` | `ubuntu2604` |
+| `--kernel` | Path to kernel source directory | auto-clone |
+| `--img-size` | Disk image size in MB | `12000`; bumped automatically for Bazzite (24 GB), Bazzite-Deck (24 GB), Batocera (16 GB), `all` (32 GB) |
 | `--clean` | Remove all cached build artifacts and start fresh | off |
 | `--kernel-only` | Build and package the kernel only, then exit | off |
-| `--patches-ref` | Branch, tag, or commit SHA for patches | `v1.2` |
+| `--patches-ref` | Branch, tag, or commit SHA for `ps5-linux-patches` | pinned in `build_image.sh` |
 
 ## Caching
 
 The build automatically skips stages that have already completed:
 
 - **Kernel source** — reused if `work/linux/` exists
-- **Kernel packages** — reused if `.deb`/`.pkg.tar.zst` files exist in `linux-bin/`
+- **Kernel packages** — reused if `linux-ps5*.deb` / `.rpm` / `.pkg.tar.zst` files exist in `linux-bin/`
 - **Root filesystem** — reused if chroot directories are populated
+- **Batocera upstream image** — `.img.gz` cached at `work/cache/` (Batocera's mirror rate-limits per-IP to ~250 KB/s, so re-downloading every run is painful)
 
 Use `--clean` to wipe everything and rebuild from scratch. The build will also suggest `--clean` if a stage fails.
 
-## Build Output
+## PS5-specific quirks baked into every image
 
-```
-PS5 Linux Image Builder
-=======================
-  Distro:       all
-                (ubuntu2604 arch cachyos)
-  Image size:   32000MB
-  Kernel src:   /path/to/work/linux
-
-Stages:
-  1. Kernel            cached
-  2. Root filesystem   build
-  3. Disk image        build
-
-Logs: /path/to/build.log
-
-  ✓ Kernel packages (cached)
-  ✓ Build image builder image
-  ⠹ Building arch rootfs
-```
-
-All verbose output goes to `build.log`. The terminal shows a spinner with live progress.
-
-## Distributions
-
-| Distro | Desktop | Kernel format | Init |
-|--------|---------|---------------|------|
-| Ubuntu 26.04 (Resolute) | GNOME | `.deb` | systemd |
-| Arch | Sway | `.pkg.tar.zst` | systemd |
-| CachyOS | Gamescope + Steam Big Picture (Arch + `[cachyos]` repo, no v3 migration in image build) | `.pkg.tar.zst` | systemd |
-| Kali Linux Rolling | XFCE + `kali-linux-everything` | `.deb` | systemd |
+- `amdgpu` modprobe options: `dpm=0 gpu_recovery=0` (Oberon GPU stays dark with stock DPM)
+- DTM TA race workaround: udev rule re-triggers DRM connector detection after `amdgpu` binds, so the screen doesn't stay dark until you manually VT-toggle
+- mwifiex IW620 driver auto-loads + firmware blob is staged from the FAT32 EFI partition on first boot
+- `linux-ps5` kernel ships in the rootfs at `/lib/modules/<kver>` with depmod already run
 
 ## Multi-distro Image
 
-`--distro all` builds a 32GB image with 4 partitions (one EFI boot partition plus three root filesystems):
+`--distro all` builds a 32 GB image with multiple partitions (one EFI boot partition plus per-distro root filesystems). The boot partition contains kexec scripts to switch between distros at runtime. Ubuntu 26.04 is the default boot target.
 
-| Partition | Type | Label | Content |
-|-----------|------|-------|---------|
-| p1 | FAT32 | boot | Shared kernel, per-distro initrds, kexec scripts |
-| p2 | ext4 | ubuntu2604 | Ubuntu 26.04 rootfs |
-| p3 | ext4 | arch | Arch rootfs |
-| p4 | ext4 | cachyos | CachyOS rootfs |
-
-The boot partition contains kexec scripts to switch between distros at runtime. Ubuntu 26.04 is the default boot target.
+(Only the `MULTI_DISTROS` list in `build_image.sh` is packed into the multi image — currently `ubuntu2604 debian13 arch alpine cachyos`. The newer distros — fedora, bazzite, batocera — are single-distro only.)
 
 ## Building the Kernel Standalone
 
 Use `--kernel-only` to compile the PS5 kernel and produce installable packages without building a full disk image.
 
 ```bash
-./build_image.sh --kernel-only                                # .deb (default)
-./build_image.sh --kernel-only --distro all                   # .deb + .pkg.tar.zst
+./build_image.sh --kernel-only                                # .deb
+./build_image.sh --kernel-only --distro all                   # .deb + .rpm + .pkg.tar.zst
 ./build_image.sh --kernel-only --patches-ref main             # fetch from specific branch/tag
 ./build_image.sh --kernel-only --clean                        # wipe and rebuild from scratch
 ```
@@ -200,7 +124,9 @@ Use `--kernel-only` to compile the PS5 kernel and produce installable packages w
 Output packages are written to `linux-bin/`. Install on a running PS5 Linux system:
 
 ```bash
-sudo dpkg -i linux-bin/linux-ps5_*.deb
+sudo dpkg  -i linux-bin/linux-ps5_*.deb            # debian / ubuntu
+sudo rpm   -Uvh --replacefiles linux-bin/linux-ps5-*.rpm   # fedora / bazzite
+sudo pacman -U linux-bin/linux-ps5-*.pkg.tar.zst    # arch / cachyos
 ```
 
 ## Directory Layout
@@ -209,22 +135,32 @@ sudo dpkg -i linux-bin/linux-ps5_*.deb
 build_image.sh                  # Image builder (also supports --kernel-only)
 docker/
   kernel-builder/               # Kernel compilation container
-  kernel-builder-arch/         # Repackages .deb kernel as .pkg.tar.zst
+  kernel-builder-arch/          # Repackages .deb kernel as .pkg.tar.zst
+  kernel-builder-rpm/           # Repackages .deb kernel as .rpm
   image-builder/
-    Dockerfile                  # Image building container (distrobuilder)
+    Dockerfile                  # Image building container (distrobuilder + skopeo + umoci)
     entrypoint.sh               # Single-distro build logic
     entrypoint-multi.sh         # Multi-distro build logic
 distros/
-  ubuntu2604/                   # Ubuntu 26.04 (Resolute)
+  ubuntu2604/                   # Ubuntu 26.04
+  debian13-{xfce,server,gnome,kde,proxmox}/
   arch/                         # Arch Linux
-  cachyos/                      # CachyOS repos + Gamescope/Steam
-  kali/                         # Kali Linux Rolling
-  shared/                       # Kernel postinst hooks (single + multi)
+  cachyos/                      # CachyOS + Gamescope/Steam
+  alpine/                       # Alpine 3.21
+  fedora-{gnome,kde}/           # Fedora 44
+  bazzite/                      # OCI extract path (covers bazzite + bazzite-deck)
+  shared/                       # Kernel postinst hooks
 boot/
   cmdline.txt                   # Kernel cmdline template (__DISTRO__ placeholder)
   vram.txt                      # VRAM allocation
-  kexec-{ubuntu2604,arch,cachyos}.sh
+  kexec.sh                      # Loader stub
+  kexec-{ubuntu2604,arch,alpine,cachyos}.sh
 work/                           # Build artifacts (auto-created)
 linux-bin/                      # Compiled kernel packages
-output/                         # Final .img files
+output/                         # Final .img / .img.xz files
+.forgejo/workflows/             # CI for the automated nightly release
 ```
+
+## Credits
+
+Upstream: [ps5-linux/ps5-linux-image](https://github.com/ps5-linux/ps5-linux-image), [ps5-linux/ps5-linux-patches](https://github.com/ps5-linux/ps5-linux-patches), [ps5-linux/ps5-linux-loader](https://github.com/ps5-linux/ps5-linux-loader), [ps5-linux/ps5-linux-mwifiex](https://github.com/ps5-linux/ps5-linux-mwifiex). The Mesa GFX1013 widening that makes the PS5 Oberon (CYAN_SKILLFISH revision) work in userspace was originally written by theflow.

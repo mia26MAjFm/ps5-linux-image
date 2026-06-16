@@ -98,9 +98,13 @@ main() {
 
     touch /etc/ps5-first-boot-done
 
-    dialog --clear --msgbox \
+    # Auto-dismiss after 8s so first-boot.service exits even if the user
+    # never sees this tty (TV is on a different input, gamescope crashed
+    # and left tty1 blank, etc). Without the timeout, getty@tty1 blocks
+    # forever on this msgbox via its After=first-boot.service drop-in.
+    dialog --clear --pause \
         "Setup complete.\n\nYou will log in on tty1 (Steam Gaming Mode).\n\nDesktop: Steam > Power > Switch to KDE\nReturn: double-click the desktop shortcut." \
-        14 62
+        14 62 8 || true
 }
 
 main "$@"

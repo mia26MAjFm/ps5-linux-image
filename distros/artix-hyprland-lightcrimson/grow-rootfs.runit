@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runit stage-1 hook: invoked once during /etc/runit/1 fan-out.
+# /usr/local/sbin/grow-rootfs handles its own self-disable by removing
+# this file at the end, so we don't fight it from here.
+exec /usr/local/sbin/grow-rootfs

@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+red=$'\033[1;31m'
+green=$'\033[1;32m'
+yellow=$'\033[1;33m'
+blue=$'\033[1;34m'
+cyan=$'\033[1;36m'
+dim=$'\033[2m'
+reset=$'\033[0m'
+
+distros() {
+    local d
+    for d in "$ROOT"/distros/*; do
+        [ -d "$d" ] || continue
+        d="$(basename "$d")"
+        [ "$d" = "shared" ] && continue
+        echo "$d"
+    done | sort
+}
+
+has_distro() {
+    local wanted="$1"
+    [ "$wanted" != "shared" ] && [ -d "$ROOT/distros/$wanted" ]
+}
+
+image_path() {
+    local distro="$1"
+    local preferred="$ROOT/output/ps5-${distro}.img"
+
+    if [ -f "$preferred" ]; then
+        echo "$preferred"
+        return
+    fi
+
+    # The rootless Ubuntu branch currently produces ps5-ubuntu.img, while
+    # upstream/default naming for the recipe is ps5-ubuntu2604.img.
+    if [ "$distro" = "ubuntu2604" ] && [ -f "$ROOT/output/ps5-ubuntu.img" ]; then
+        echo "$ROOT/output/ps5-ubuntu.img"
+        return
+    fi
+
+    echo "$preferred"
+}
+
+baseline_path() {
+    local distro="$1"
+    local preferred="$ROOT/ps5-${distro}.img"
+
+    if [ -f "$preferred" ]; then
+        echo "$preferred"
+        return
+    fi
+
+    if [ "$distro" = "ubuntu2604" ] && [ -f "$ROOT/ps5-ubuntu2604.img" ]; then
+        echo "$ROOT/ps5-ubuntu2604.img"
+        return
+    fi
+
+    echo ""
+}
+
+need_distro() {
+    local distro="${1:-}"
+    if [ -z "$distro" ]; then
+        echo "${red}error:${reset} missing distro target" >&2
+        usage >&2
+        exit 2
+    fi
+    if ! has_distro "$distro"; then
+        echo "${red}error:${reset} unknown distro '$distro'" >&2
+        echo "Available: $(distros | paste -sd ' ' -)" >&2
+        exit 2
+    fi
+}
+
+need_image() {
+    local image="$1"
+    local distro="$2"
+    if [ ! -f "$image" ]; then
+        echo "${red}error:${reset} image not found: $image" >&2
+        echo "Build it first with: ${cyan}devbox run build $distro${reset}" >&2
+        exit 1
+    fi
+}
+
+list_distros() {
+    if [ "${1:-}" = "--inline" ]; then
+        printf '  %sTargets:%s %s%s%s\n' "$red" "$reset" "$dim" "$(distros | paste -sd ' ' -)" "$reset"
+    else
+        distros
+    fi
+}
+
+usage() {
+    cat <<EOF
+Usage: devbox run <command> <distro> [extra args]
+
+Commands:
+  devbox run build <distro>       Build output/ps5-<distro>.img
+  devbox run check <distro>       Validate image structure; compares baseline if present
+  devbox run smoke <distro>       QEMU USB-root smoke boot to systemd
+  devbox run validate <distro>    check + smoke
+  devbox run distros              List available distro targets
+
+Examples:
+  devbox run build miaos
+  devbox run check miaos
+  devbox run smoke miaos
+  devbox run validate miaos
+EOF
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+    list|distros)
+        list_distros "${1:-}"
+        ;;
+    build)
+        distro="${1:-}"
+        need_distro "$distro"
+        shift
+        exec "$ROOT/build_image.sh" --distro "$distro" "$@"
+        ;;
+    check)
+        distro="${1:-}"
+        need_distro "$distro"
+        shift
+        image="$(image_path "$distro")"
+        baseline="$(baseline_path "$distro")"
+        need_image "$image" "$distro"
+        if [ -n "$baseline" ]; then
+            exec "$ROOT/check_image.sh" "$baseline" "$image" "$@"
+        else
+            exec "$ROOT/check_image.sh" "$image" "$@"
+        fi
+        ;;
+    smoke)
+        distro="${1:-}"
+        need_distro "$distro"
+        shift
+        image="$(image_path "$distro")"
+        need_image "$image" "$distro"
+        exec "$ROOT/test_image.sh" "$image" \
+            --memory "${SMOKE_MEMORY:-2G}" \
+            --smp "${SMOKE_SMP:-2}" \
+            --ssh-port none \
+            --smoke-timeout "${SMOKE_TIMEOUT:-60}" \
+            --log "/tmp/ps5-${distro}-smoke.log" \
+            --qemu-arg -no-reboot \
+            "$@"
+        ;;
+    validate)
+        distro="${1:-}"
+        need_distro "$distro"
+        shift
+        "$ROOT/tools/devbox-image" check "$distro"
+        exec "$ROOT/tools/devbox-image" smoke "$distro" "$@"
+        ;;
+    -h|--help|help|"")
+        usage
+        ;;
+    *)
+        echo "${red}error:${reset} unknown command '$cmd'" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

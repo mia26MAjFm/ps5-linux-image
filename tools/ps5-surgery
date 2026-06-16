@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# ps5-surgery — apply a structural fix to a previously-built PS5 image without
+# rebuilding from scratch. Designed for operator-driven tweaks on the minipc:
+# pull the latest published image, mount + chroot, edit, repack, re-publish.
+#
+# Kernel updates go via the slow path (upstream-watch.yml nightly cron); this
+# tool is for the "I just want to remove a flag from one config file" cases.
+#
+# Usage:
+#   sudo ps5-surgery <distro> [<distro>...]              # interactive chroot shell
+#   sudo ps5-surgery <distro> --script /path/to/file     # non-interactive
+#   sudo ps5-surgery <distro> --img /path/to/img.xz      # skip fetch, use local file
+#   sudo ps5-surgery <distro> --no-publish               # produce .img.xz only
+#   sudo ps5-surgery all [--script ...]                  # all distros (sequential)
+#
+# Auth for upload:
+#   FORGEJO_TOKEN env var, or ~/.mia_forgejo_token file. Falls back to
+#   --no-publish if neither is present.
+
+set -euo pipefail
+
+REPO="${REPO:-mia/ps5-linux-image}"
+SERVER="${SERVER:-https://git.etawen.dev}"
+WORK="${WORK:-/data/surgery}"
+TAG="${TAG:-latest}"
+ALL_DISTROS=(ubuntu2604 mint22-cinnamon debian13-xfce debian13-server
+             debian13-gnome debian13-kde debian13-proxmox arch cachyos
+             alpine fedora-gnome fedora-kde bazzite bazzite-deck batocera
+             artix-openrc devuan-sway miaos)
+
+SCRIPT=""
+IMG_OVERRIDE=""
+PUBLISH=1
+DISTROS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --script)     SCRIPT="$2"; shift 2 ;;
+        --img)        IMG_OVERRIDE="$2"; shift 2 ;;
+        --no-publish) PUBLISH=0; shift ;;
+        -h|--help)
+            sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+            exit 0 ;;
+        all) DISTROS=("${ALL_DISTROS[@]}"); shift ;;
+        *)   DISTROS+=("$1"); shift ;;
+    esac
+done
+
+[ "${#DISTROS[@]}" -gt 0 ] || { echo "no distro given. see --help" >&2; exit 2; }
+[ "$EUID" = 0 ] || { echo "needs root (loop mount + chroot)" >&2; exit 1; }
+
+TOKEN="${FORGEJO_TOKEN:-}"
+if [ -z "$TOKEN" ] && [ -r "${SUDO_USER:+/home/$SUDO_USER}/.mia_forgejo_token" ]; then
+    TOKEN=$(cat "/home/$SUDO_USER/.mia_forgejo_token")
+elif [ -z "$TOKEN" ] && [ -r ~/.mia_forgejo_token ]; then
+    TOKEN=$(cat ~/.mia_forgejo_token)
+fi
+if [ "$PUBLISH" = 1 ] && [ -z "$TOKEN" ]; then
+    echo "no FORGEJO_TOKEN and no ~/.mia_forgejo_token; flipping to --no-publish"
+    PUBLISH=0
+fi
+
+mkdir -p "$WORK"
+
+patch_one() {
+    local D="$1"
+    local IMG="$WORK/$D.img"
+    local XZ="$WORK/ps5-$D.img.xz"
+    echo
+    echo "================ $D ================"
+
+    # ---- fetch ----
+    if [ -n "$IMG_OVERRIDE" ]; then
+        echo "using local image: $IMG_OVERRIDE"
+        cp "$IMG_OVERRIDE" "$WORK/ps5-$D.img.xz"
+    else
+        local URL="$SERVER/$REPO/releases/download/$TAG/ps5-$D.img.xz"
+        echo "fetching $URL"
+        curl -fSL -o "$XZ" "$URL"
+    fi
+
+    echo "decompressing..."
+    xz -dc "$XZ" > "$IMG"
+    rm -f "$XZ"
+
+    # ---- loop-mount + chroot prep ----
+    local LOOP
+    LOOP=$(losetup --show -fP "$IMG")
+    udevadm settle
+    for _ in 1 2 3 4 5; do [ -b "${LOOP}p1" ] && break; sleep 1; done
+
+    local ROOTPART="${LOOP}p1"
+    local EFIPART="${LOOP}p2"
+    if [ "$(blkid -o value -s TYPE "$ROOTPART" 2>/dev/null || true)" = "vfat" ]; then
+        ROOTPART="${LOOP}p2"
+        EFIPART="${LOOP}p1"
+    fi
+
+    local CHROOT
+    CHROOT=$(mktemp -d)
+    mount "$ROOTPART" "$CHROOT"
+    mkdir -p "$CHROOT/boot/efi"
+    mount "$EFIPART" "$CHROOT/boot/efi" 2>/dev/null || true
+    mount --bind /proc "$CHROOT/proc"
+    mount --bind /sys  "$CHROOT/sys"
+    mount --bind /dev  "$CHROOT/dev"
+    [ -L "$CHROOT/etc/resolv.conf" ] && rm "$CHROOT/etc/resolv.conf"
+    cp /etc/resolv.conf "$CHROOT/etc/resolv.conf" 2>/dev/null || true
+
+    local trap_done=0
+    cleanup_mounts() {
+        [ "$trap_done" = 1 ] && return
+        trap_done=1
+        sync
+        for m in /boot/efi /proc /sys /dev ""; do
+            mountpoint -q "$CHROOT$m" && umount -l "$CHROOT$m" 2>/dev/null || true
+        done
+        rmdir "$CHROOT" 2>/dev/null || true
+        losetup -d "$LOOP" 2>/dev/null || true
+    }
+    trap 'rc=$?; cleanup_mounts; exit $rc' EXIT INT TERM
+
+    # ---- operator's edits ----
+    echo
+    if [ -n "$SCRIPT" ]; then
+        local NAME
+        NAME=$(basename "$SCRIPT")
+        cp "$SCRIPT" "$CHROOT/tmp/$NAME"
+        chmod +x "$CHROOT/tmp/$NAME"
+        echo ">> running $NAME inside $D chroot"
+        chroot "$CHROOT" "/tmp/$NAME" || { echo "script exited non-zero; aborting $D"; cleanup_mounts; rm -f "$IMG"; return 1; }
+        rm -f "$CHROOT/tmp/$NAME"
+    else
+        echo ">> Entering interactive chroot for $D."
+        echo ">> Type 'exit' when done. Exit 1 to abort this distro."
+        echo
+        chroot "$CHROOT" /usr/bin/env PS1="[surgery:$D] \w # " /bin/bash -i || \
+            { echo "chroot exited non-zero; aborting $D"; cleanup_mounts; rm -f "$IMG"; return 1; }
+    fi
+
+    cleanup_mounts
+    trap - EXIT INT TERM
+
+    # ---- repack ----
+    echo "compressing $D (xz -T0 -9)..."
+    xz -T0 -9 -c "$IMG" > "$XZ"
+    local SHA
+    SHA=$(sha256sum "$XZ" | awk '{print $1}')
+    local SZ
+    SZ=$(du -h "$XZ" | awk '{print $1}')
+    echo "  -> $XZ  $SZ  $SHA"
+    rm -f "$IMG"
+
+    # ---- publish ----
+    if [ "$PUBLISH" = 1 ]; then
+        echo "publishing $XZ to $REPO releases/$TAG..."
+        local API="$SERVER/api/v1/repos/$REPO"
+        local UA="ps5-surgery/1.0"
+        local REL_ID
+        REL_ID=$(curl -fsS -H "Authorization: token $TOKEN" -H "User-Agent: $UA" \
+            "$API/releases/tags/$TAG" \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+        local FILE="ps5-$D.img.xz"
+        curl -fsS -H "Authorization: token $TOKEN" -H "User-Agent: $UA" \
+            "$API/releases/$REL_ID/assets" > /tmp/assets.json
+        for AID in $(FILE="$FILE" python3 -c 'import json,os;[print(a["id"]) for a in json.load(open("/tmp/assets.json")) if a["name"]==os.environ["FILE"]]'); do
+            curl -fsS -X DELETE -H "Authorization: token $TOKEN" -H "User-Agent: $UA" \
+                "$API/releases/$REL_ID/assets/$AID" || true
+        done
+        curl -fsS -X POST -H "Authorization: token $TOKEN" -H "User-Agent: $UA" \
+            -F "attachment=@$XZ" \
+            "$API/releases/$REL_ID/assets?name=$FILE"
+        echo "  ✓ published"
+    else
+        echo "  ($XZ left on disk; --no-publish or no token)"
+    fi
+}
+
+for D in "${DISTROS[@]}"; do
+    patch_one "$D" || echo "FAILED: $D — continuing with remaining distros"
+done
+echo
+echo "done. surgery workspace: $WORK"

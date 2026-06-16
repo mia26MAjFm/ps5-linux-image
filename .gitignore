@@ -7,3 +7,6 @@ build.log
 
 *.swp
 patches.diff
+linux-bin
+kernel-out/
+logs/

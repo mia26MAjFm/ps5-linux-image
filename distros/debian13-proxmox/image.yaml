@@ -1,0 +1,336 @@
+image:
+  name: ps5-debian13-proxmox
+  distribution: debian
+  release: trixie
+  description: Debian 13 Trixie + Proxmox VE 9 (PS5)
+  architecture: x86_64
+
+source:
+  downloader: debootstrap
+  url: http://deb.debian.org/debian
+  variant: minbase
+  keyserver: keyserver.ubuntu.com
+  keys:
+  - 0x41587F7DB8C774BCCF131416762F67A0B2C39DE4
+  - 0x04B54C3CDCA79751B16BC6B5225629DF75B188BD
+  - 0xB8E5F13176D2A7A75220028078DBA3BC47EF2265
+  - 0x5E04A1E3223A19A20706E20F9904613D4CCE68C6
+  - 0x89C87ACEA5DD6B8E6A7068808E9F831205B4BA95
+
+packages:
+  manager: apt
+  update: true
+  cleanup: true
+
+  repositories:
+  - name: sources.list
+    url: |-
+      deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware
+      deb http://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware
+      deb http://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
+    architectures:
+    - amd64
+
+  sets:
+  - packages:
+    # Firmware
+    - firmware-linux
+    - firmware-linux-free
+    - firmware-linux-nonfree
+    - firmware-amd-graphics
+    - firmware-misc-nonfree
+    - firmware-realtek
+    - firmware-iwlwifi
+    - firmware-atheros
+    - amd64-microcode
+
+    # Networking (Proxmox prefers ifupdown2 + bridge-utils for vmbr0)
+    - network-manager
+    - bridge-utils
+    - ifupdown2
+    - ethtool
+    - systemd-resolved
+    - wpasupplicant
+    - wireless-tools
+    - iw
+
+    # System
+    - systemd-sysv
+    - dbus
+    - openssh-server
+    - sudo
+    - initramfs-tools
+    - kmod
+    - kexec-tools
+    - cloud-guest-utils
+    - cloud-utils
+    - e2fsprogs
+    - dosfstools
+    - parted
+    - pciutils
+    - usbutils
+    - nvme-cli
+    - chrony
+    - postfix         # Proxmox depends on a working MTA
+
+    # KVM / LXC base — Proxmox ships its own patched qemu (pve-qemu-kvm)
+    # which conflicts with Debian's qemu-system-x86. Don't pull Debian's
+    # qemu, let pve-qemu-kvm be the provider when proxmox-ve drags it in.
+    - lvm2
+    - thin-provisioning-tools
+    - open-iscsi
+
+    # Proxmox VE 9 user-facing pieces. NOT the meta-package `proxmox-ve`
+    # because that hard-depends on proxmox-default-kernel — we use linux-ps5
+    # instead. Pin in post-unpack blocks the kernel packages.
+    - pve-manager
+    - qemu-server          # pulls pve-qemu-kvm
+    - pve-cluster
+    - pve-container
+    - pve-edk2-firmware
+    - pve-firewall
+    - pve-ha-manager
+    - proxmox-backup-client
+    - novnc-pve
+    - spiceterm
+    - libpve-storage-perl
+    - libpve-common-perl
+    - libpve-rs-perl
+    - libpve-cluster-perl
+
+    # Base tools
+    - nano
+    - vim
+    - htop
+    - wget
+    - curl
+    - git
+    - bash-completion
+    - fonts-noto-cjk
+    - fonts-noto-color-emoji
+    action: install
+
+files:
+- path: /etc/hostname
+  generator: hostname
+
+- path: /etc/hosts
+  generator: hosts
+
+- path: /etc/machine-id
+  generator: dump
+
+- path: /etc/NetworkManager/conf.d/dns.conf
+  generator: copy
+  source: /tmp/build-staging/nm-dns.conf
+
+- path: /etc/kernel/postinst.d/zz-update-boot
+  generator: copy
+  source: /tmp/build-staging/zz-update-boot
+  mode: "0755"
+
+- path: /etc/fstab
+  generator: copy
+  source: /tmp/build-staging/fstab
+
+- path: /usr/local/sbin/grow-rootfs
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs
+  mode: "0755"
+
+- path: /etc/systemd/system/grow-rootfs.service
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs.service
+
+- path: /opt/debs/
+  generator: copy
+  source: /tmp/build-staging/debs
+
+actions:
+- trigger: post-unpack
+  action: |-
+    #!/bin/bash
+    set -eux
+    rm -f /var/lib/apt/lists/*InRelease /var/lib/apt/lists/*Release /var/lib/apt/lists/*Packages* || true
+    echo 'Acquire::Retries "10";' > /etc/apt/apt.conf.d/80retry
+
+    # Proxmox no-subscription repo + key.
+    install -d /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
+    apt-get update
+    apt-get install -y --no-install-recommends wget ca-certificates gnupg
+    wget -qO /etc/apt/keyrings/proxmox-release-trixie.gpg \
+        https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg
+    chmod 0644 /etc/apt/keyrings/proxmox-release-trixie.gpg
+    cat > /etc/apt/sources.list.d/pve.sources <<PVE
+    Types: deb
+    URIs: http://download.proxmox.com/debian/pve
+    Suites: trixie
+    Components: pve-no-subscription
+    Signed-By: /etc/apt/keyrings/proxmox-release-trixie.gpg
+    PVE
+
+    # Block Proxmox's own kernel — we use linux-ps5. Negative pin = apt
+    # refuses to install or pull these as deps. This is the same trick the
+    # community uses when running PVE on custom kernels.
+    cat > /etc/apt/preferences.d/no-pve-kernel <<PIN
+    Package: pve-kernel-* proxmox-default-kernel proxmox-kernel-* proxmox-default-headers proxmox-headers-* linux-image-pve* linux-headers-pve*
+    Pin: release *
+    Pin-Priority: -1
+    PIN
+
+    # Pre-seed postfix so it doesn't open a debconf TUI
+    debconf-set-selections <<DC
+    postfix postfix/main_mailer_type select Local only
+    postfix postfix/mailname string ps5
+    DC
+
+    apt-get update
+
+- trigger: post-update
+  action: |-
+    #!/bin/bash
+    set -eux
+    passwd -l root
+
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -eux
+    fc-cache -f -v 2>/dev/null || true
+
+    # SSH — Proxmox web UI is the primary admin path; ssh stays for fallback.
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/'              /etc/ssh/sshd_config
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    systemctl enable ssh
+
+    # tty autologin for ps5 (server build, no DE)
+    mkdir -p /etc/systemd/system/getty@tty1.service.d
+    cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<TTY
+    [Service]
+    ExecStart=
+    ExecStart=-/sbin/agetty --autologin ps5 --noclear %I \$TERM
+    TTY
+
+    systemctl enable NetworkManager
+    systemctl enable chronyd || true
+
+    apt-get install -y systemd-zram-generator || true
+    if command -v zram-generator >/dev/null 2>&1; then
+        printf '[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\n' > /etc/systemd/zram-generator.conf
+    fi
+
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    set -eux
+    systemctl enable grow-rootfs.service
+    systemctl enable systemd-resolved
+    mkdir -p /etc/tmpfiles.d
+    printf 'L+ /etc/resolv.conf - - - - /run/systemd/resolve/stub-resolv.conf\n' \
+        > /etc/tmpfiles.d/resolv-conf.conf
+
+    # User. Proxmox needs root accessible (its web UI authenticates against
+    # root@pam by default). Set a known root password AND give ps5 sudo.
+    echo "root:ps5" | chpasswd
+    useradd -m -s /bin/bash -G sudo,video,audio,input,render ps5
+    echo "ps5:ps5" | chpasswd
+    echo "ps5 ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/ps5
+    chmod 440 /etc/sudoers.d/ps5
+
+    # linux-ps5 kernel
+    mkdir -p /boot/efi
+    rm -f /etc/kernel/postinst.d/kdump-tools
+    dpkg -i /opt/debs/*.deb
+    rm -rf /opt/debs
+    KVER=$(ls -1t /lib/modules | head -1)
+    update-initramfs -c -k "$KVER"
+    /etc/kernel/postinst.d/zz-update-boot "$KVER"
+
+    # amdgpu — same PS5 quirks as the other Debian flavors
+    cat > /etc/modprobe.d/ps5-amdgpu.conf <<MODPROBE
+    options amdgpu dpm=0 gpu_recovery=0
+    MODPROBE
+
+    # KVM modules — load eagerly so PVE doesn't have to scramble at first boot.
+    cat > /etc/modules-load.d/kvm.conf <<KVM
+    kvm
+    kvm_amd
+    KVM
+
+    # Serial console
+    systemctl enable serial-getty@ttyTitania0.service
+
+    # Proxmox PVE services. The standard set on a single-node install:
+    systemctl enable pve-cluster pvedaemon pveproxy pvestatd pvescheduler \
+                     pve-firewall pve-ha-lrm pve-ha-crm \
+                     pveproxy.service pve-guests.service 2>/dev/null || true
+
+    # First-boot vmbr0 helper: the PS5's USB ethernet shows up under a
+    # non-deterministic name (enp32s0f4u2, enxXX:XX:..., etc). Generate a
+    # vmbr0 bridge over whichever interface is up at first boot. Proxmox
+    # expects /etc/network/interfaces — write a minimal one + a oneshot
+    # that fills in bridge-ports after udev settles.
+    cat > /etc/network/interfaces <<NET
+    auto lo
+    iface lo inet loopback
+
+    # vmbr0 is populated on first boot by ps5-bridge.service.
+    NET
+
+    cat > /usr/local/sbin/ps5-bridge <<'BR'
+    #!/bin/bash
+    set -euo pipefail
+    # Pick the first non-loopback, non-virtual interface that came up via udev.
+    IFACE=$(ip -o link show | awk -F: '$2 ~ /lo|vmbr|tap|docker|veth|virbr/ {next} {gsub(" ","",$2); print $2; exit}')
+    [ -z "$IFACE" ] && { echo "no candidate interface"; exit 0; }
+    [ -f /etc/network/interfaces.d/vmbr0 ] && exit 0
+    cat > /etc/network/interfaces.d/vmbr0 <<NET2
+    auto $IFACE
+    iface $IFACE inet manual
+
+    auto vmbr0
+    iface vmbr0 inet dhcp
+        bridge-ports $IFACE
+        bridge-stp off
+        bridge-fd 0
+    NET2
+    ifup vmbr0 || true
+    BR
+    chmod +x /usr/local/sbin/ps5-bridge
+
+    cat > /etc/systemd/system/ps5-bridge.service <<SVC
+    [Unit]
+    Description=Populate Proxmox vmbr0 from the first available interface
+    After=network-pre.target
+    Before=networking.service pve-cluster.service
+    ConditionPathExists=/usr/local/sbin/ps5-bridge
+
+    [Service]
+    Type=oneshot
+    ExecStart=/usr/local/sbin/ps5-bridge
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    SVC
+    systemctl enable ps5-bridge.service
+
+    # Hold linux-ps5 against upstream replacement.
+    apt-mark hold linux-ps5 || true
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    # Pre-configure repo.etawen.dev (mia's signed kernel repo) so users get
+    # linux-ps5 updates via apt-get upgrade after first boot.
+    set -eux
+    install -d -m 755 /etc/apt/keyrings
+    curl -fsSL https://repo.etawen.dev/key.asc \
+        | gpg --dearmor -o /etc/apt/keyrings/etawen-ps5.gpg
+    chmod 644 /etc/apt/keyrings/etawen-ps5.gpg
+    cat > /etc/apt/sources.list.d/etawen-ps5.list <<EOF
+    deb [signed-by=/etc/apt/keyrings/etawen-ps5.gpg] https://repo.etawen.dev/deb ./
+    EOF
+
+
+mappings:
+  architecture_map: debian

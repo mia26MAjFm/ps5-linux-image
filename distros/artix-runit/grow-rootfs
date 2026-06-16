@@ -1,0 +1,16 @@
+#!/bin/sh
+# Grows the root partition and filesystem to fill the disk.
+# Runs once on first boot, then disables itself.
+set -e
+
+ROOT_DEV=$(findmnt -no SOURCE /)
+DISK=$(lsblk -ndo PKNAME "$ROOT_DEV")
+PART_NUM=$(cat /sys/class/block/$(basename "$ROOT_DEV")/partition)
+
+growpart "/dev/$DISK" "$PART_NUM" || true
+partprobe "/dev/$DISK"
+resize2fs "$ROOT_DEV" || true
+
+# Self-disable on runit: the stage-1 hook /etc/runit/1.d/grow-rootfs
+# is what called us — drop it so it doesn't run again next boot.
+rm -f /etc/runit/1.d/grow-rootfs

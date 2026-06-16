@@ -7,8 +7,15 @@ ROOT_DEV=$(findmnt -no SOURCE /)
 DISK="/dev/$(lsblk -ndo PKNAME "$ROOT_DEV")"
 PART_NUM=$(cat /sys/class/block/$(basename "$ROOT_DEV")/partition)
 
-parted -s "$DISK" resizepart "$PART_NUM" 100%
+# Our images dd at their built size (e.g. 16 GB) onto a much larger USB.
+# The GPT backup header is therefore at byte ~built-size, not at end of disk —
+# parted refuses non-interactively (-s) on that warning, so use sgdisk -e to
+# relocate the backup header first. Then growpart resizes the partition entry,
+# partprobe re-reads the table, and resize2fs grows the ext4 fs online.
+sgdisk -e "$DISK"
 partprobe "$DISK"
+sleep 1
+growpart "$DISK" "$PART_NUM"
 resize2fs "$ROOT_DEV"
 
 systemctl disable grow-rootfs.service

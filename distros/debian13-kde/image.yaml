@@ -1,0 +1,265 @@
+image:
+  name: ps5-debian13-kde
+  distribution: debian
+  release: trixie
+  description: Debian 13 Trixie KDE Plasma desktop
+  architecture: x86_64
+
+source:
+  downloader: debootstrap
+  url: http://deb.debian.org/debian
+  variant: minbase
+  keyserver: keyserver.ubuntu.com
+  keys:
+  # Trixie (Debian 13) signing keys — pulled from ftp-master.debian.org/keys.
+  - 0x41587F7DB8C774BCCF131416762F67A0B2C39DE4  # release-13 (Stable Release Key 13/trixie)
+  - 0x04B54C3CDCA79751B16BC6B5225629DF75B188BD  # archive-key-13
+  - 0xB8E5F13176D2A7A75220028078DBA3BC47EF2265  # archive-key-13 (auto)
+  - 0x5E04A1E3223A19A20706E20F9904613D4CCE68C6  # archive-key-13-security
+  - 0x89C87ACEA5DD6B8E6A7068808E9F831205B4BA95  # archive-key-13-security (auto)
+
+packages:
+  manager: apt
+  update: true
+  cleanup: true
+
+  repositories:
+  - name: sources.list
+    url: |-
+      deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware
+      deb http://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware
+      deb http://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
+    architectures:
+    - amd64
+
+  sets:
+  - packages:
+    # Desktop (KDE Plasma) — plasma-workspace-wayland isn't a Trixie package;
+    # kde-plasma-desktop already pulls plasma-workspace + kwin-wayland.
+    - kde-plasma-desktop
+    - plasma-nm
+    - plasma-pa
+    # `kdeplasma-addons` was renamed in Trixie (Plasma 6) to plasma-widgets-addons.
+    # The old name still exists as kdeplasma-addons-data (just locale files).
+    - plasma-widgets-addons
+    - konsole
+    - dolphin
+    - systemsettings
+    - sddm
+
+    # Display / GPU
+    - xorg
+    - mesa-vulkan-drivers
+    - libdrm-amdgpu1
+    - xserver-xorg-video-amdgpu
+    - firmware-amd-graphics
+    # Debian doesn't ship a single 'linux-firmware' meta — pick the bits the PS5
+    # actually needs (AMD GPU/iGPU + audio + USB wifi/BT firmware blobs).
+    - firmware-linux
+    - firmware-linux-free
+    - firmware-linux-nonfree
+    - firmware-misc-nonfree
+    - firmware-realtek
+    - firmware-iwlwifi
+    - firmware-atheros
+
+    # Audio
+    - pipewire
+    - pipewire-pulse
+    - wireplumber
+    - pipewire-alsa
+    - alsa-utils
+
+    # Networking
+    - network-manager
+    - network-manager-gnome
+    - wpasupplicant
+    - wireless-tools
+    # Trixie ships systemd-resolved as a separate package (not bundled in
+    # systemd as Ubuntu does). post-files hook below `systemctl enable`s it.
+    - systemd-resolved
+    - iw
+
+    # System
+    - systemd-sysv
+    - dbus
+    - openssh-server
+    - sudo
+    - initramfs-tools
+    - kmod
+    - kexec-tools
+    - cloud-guest-utils
+    - e2fsprogs
+    - dosfstools
+    - parted
+    - pciutils
+    - usbutils
+    - nvme-cli
+
+    # Base tools
+    - nano
+    - vim
+    - htop
+    - wget
+    - curl
+    - git
+    - build-essential
+    - bash-completion
+    - firefox-esr
+    - dialog
+    - systemd-zram-generator
+
+    # Fonts
+    - fonts-liberation
+    - fonts-dejavu
+    - fontconfig
+
+    # Kernel build deps (for rebuilding if needed)
+    - flex
+    - gawk
+    - bison
+    - dwarves
+    - libelf-dev
+    - libssl-dev
+    - libncurses-dev
+    - fonts-noto-cjk
+    - fonts-noto-color-emoji
+    action: install
+
+files:
+- path: /etc/hostname
+  generator: hostname
+
+- path: /etc/hosts
+  generator: hosts
+
+- path: /etc/machine-id
+  generator: dump
+
+- path: /etc/NetworkManager/conf.d/dns.conf
+  generator: copy
+  source: /tmp/build-staging/nm-dns.conf
+
+- path: /etc/kernel/postinst.d/zz-update-boot
+  generator: copy
+  source: /tmp/build-staging/zz-update-boot
+  mode: "0755"
+
+- path: /etc/fstab
+  generator: copy
+  source: /tmp/build-staging/fstab
+
+- path: /usr/local/sbin/grow-rootfs
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs
+  mode: "0755"
+
+- path: /etc/systemd/system/grow-rootfs.service
+  generator: copy
+  source: /tmp/build-staging/grow-rootfs.service
+
+- path: /opt/debs/
+  generator: copy
+  source: /tmp/build-staging/debs
+
+actions:
+- trigger: post-unpack
+  action: |-
+    #!/bin/bash
+    set -eux
+    rm -f /var/lib/apt/lists/*InRelease /var/lib/apt/lists/*Release /var/lib/apt/lists/*Packages* || true
+    echo 'Acquire::Retries "10";' > /etc/apt/apt.conf.d/80retry
+    apt-get update
+
+- trigger: post-update
+  action: |-
+    #!/bin/bash
+    set -eux
+    passwd -l root
+
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -eux
+    fc-cache -f -v
+
+    # SSH
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/'               /etc/ssh/sshd_config
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    systemctl enable ssh
+
+    # SDDM autologin (KDE Plasma)
+    mkdir -p /etc/sddm.conf.d
+    cat > /etc/sddm.conf.d/autologin.conf <<SDDM
+    [Autologin]
+    User=ps5
+    Session=plasma
+    SDDM
+    systemctl enable sddm
+
+    # NetworkManager
+    systemctl enable NetworkManager
+
+    # Pipewire as default audio
+    systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service
+
+    # zram swap
+    apt-get install -y systemd-zram-generator || true
+    if command -v zram-generator >/dev/null 2>&1; then
+        printf '[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\n' > /etc/systemd/zram-generator.conf
+    fi
+
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    set -eux
+    systemctl enable grow-rootfs.service
+    systemctl enable systemd-resolved
+    # /etc/resolv.conf is bind-mounted by distrobuilder during build so we
+    # can't replace it here. Defer to systemd-tmpfiles at first boot.
+    mkdir -p /etc/tmpfiles.d
+    printf 'L+ /etc/resolv.conf - - - - /run/systemd/resolve/stub-resolv.conf\n' \
+        > /etc/tmpfiles.d/resolv-conf.conf
+
+    # Create user
+    useradd -m -s /bin/bash -G sudo,video,audio,input,render ps5
+    echo "ps5:ps5" | chpasswd
+    echo "ps5 ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/ps5
+    chmod 440 /etc/sudoers.d/ps5
+
+    # Install ps5-linux kernel .debs
+    mkdir -p /boot/efi
+    rm -f /etc/kernel/postinst.d/kdump-tools
+    dpkg -i /opt/debs/*.deb
+    rm -rf /opt/debs
+    KVER=$(ls -1t /lib/modules | head -1)
+    update-initramfs -c -k "$KVER"
+    /etc/kernel/postinst.d/zz-update-boot "$KVER"
+
+    # amdgpu config
+    cat > /etc/modprobe.d/ps5-amdgpu.conf <<MODPROBE
+    options amdgpu dpm=0 gpu_recovery=0
+    MODPROBE
+
+    # Serial console
+    systemctl enable serial-getty@ttyTitania0.service
+
+    # Hold linux-ps5 against upstream replacement.
+    apt-mark hold linux-ps5 || true
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    # Pre-configure repo.etawen.dev (mia's signed kernel repo) so users get
+    # linux-ps5 updates via apt-get upgrade after first boot.
+    set -eux
+    install -d -m 755 /etc/apt/keyrings
+    curl -fsSL https://repo.etawen.dev/key.asc \
+        | gpg --dearmor -o /etc/apt/keyrings/etawen-ps5.gpg
+    chmod 644 /etc/apt/keyrings/etawen-ps5.gpg
+    cat > /etc/apt/sources.list.d/etawen-ps5.list <<EOF
+    deb [signed-by=/etc/apt/keyrings/etawen-ps5.gpg] https://repo.etawen.dev/deb ./
+    EOF
+
+
+mappings:
+  architecture_map: debian
