@@ -35,13 +35,7 @@ RUN mkdir -p /root/go/src/github.com/lxc/ && \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     skopeo \
     && rm -rf /var/lib/apt/lists/*
-# CACHEBUST: one of the org runners has a broken cached layer for the umoci
-# install that fails with `/bin/sh: no such file`. Pass a fresh value via
-# `docker build --build-arg CACHEBUST=$(date +%s)` to force rebuild of this
-# step (the apt installs above stay cached).
-ARG CACHEBUST=0
-RUN echo "cachebust=$CACHEBUST" && \
-    go install github.com/opencontainers/umoci/cmd/umoci@v0.5.0 && \
+RUN go install github.com/opencontainers/umoci/cmd/umoci@v0.5.0 && \
     cp /root/go/bin/umoci /usr/local/bin/umoci && \
     rm -rf /root/go/pkg
 

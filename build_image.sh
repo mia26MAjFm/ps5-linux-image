@@ -355,7 +355,7 @@ fi
 
 # --- Step 2: Build distribution image ---
 run_stage "Build image builder image" \
-    docker build --pull --build-arg "CACHEBUST=$(date +%s)" \
+    docker build --pull --no-cache \
         -t ps5-image-builder -f "$SCRIPT_DIR/docker/image-builder/Dockerfile" "$SCRIPT_DIR"
 
 if [ "$DISTRO" = "all" ]; then
