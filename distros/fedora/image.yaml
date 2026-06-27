@@ -45,6 +45,10 @@ packages:
     - xorg-x11-server-Xwayland
     - polkit
 
+    # Bluetooth
+    - bluez
+    - bluez-tools
+
     # Audio / media
     - pipewire
     - wireplumber
@@ -67,16 +71,6 @@ packages:
     - wpa_supplicant
     - wireless-regdb
     - util-linux
-
-    # Toolchain for the out-of-tree PS5 IW620 WiFi module build
-    - gcc
-    - make
-    - git-core
-    - bc
-    - bison
-    - flex
-    - elfutils-libelf-devel
-    - openssl-devel
 
     # System
     - glibc-langpack-en
@@ -158,6 +152,7 @@ actions:
     systemctl enable sshd
     systemctl enable NetworkManager
     systemctl enable gdm
+    systemctl enable bluetooth.service
     systemctl set-default graphical.target
 
     # The PS5 kernel patch writes into the request_firmware() buffer to skip
@@ -233,29 +228,18 @@ actions:
     KVER=$(ls -1t /lib/modules | head -1)
     [ -f "/boot/efi/bzImage" ] && [ -f "/boot/efi/initrd.img" ]
 
-    # --- PS5 internal WiFi: build the PS5-patched NXP IW620 mwifiex modules ---
-    IW620_SRC=/tmp/ps5-iw620-mwifiex
-    IW620_PATCHES=/tmp/ps5-linux-mwifiex
-    IW620_NXP_REF=a5fe4e194bf99315e349d81d77d6dfacec70757a
-    IW620_PATCH_REF=5cfd063449f27e2f8a7d17c814a3bb21c27aa903
-    rm -rf "$IW620_SRC" "$IW620_PATCHES"
-    git clone https://github.com/nxp-imx/mwifiex.git "$IW620_SRC"
-    git -C "$IW620_SRC" checkout "$IW620_NXP_REF"
-    git clone https://github.com/ps5-linux/ps5-linux-mwifiex.git "$IW620_PATCHES"
-    git -C "$IW620_PATCHES" checkout "$IW620_PATCH_REF"
-    git -C "$IW620_SRC" apply "$IW620_PATCHES/ps5-iw620.patch"
-    make -C "$IW620_SRC" CONFIG_OBJTOOL= KERNELDIR="/usr/lib/modules/$KVER/build" ARCH=x86 -j"$(nproc)"
-    test -f "$IW620_SRC/mlan.ko"
-    test -f "$IW620_SRC/moal.ko"
-    install -d "/usr/lib/modules/$KVER/extra/ps5-iw620"
-    install -m 0644 "$IW620_SRC/mlan.ko" "/usr/lib/modules/$KVER/extra/ps5-iw620/mlan.ko"
-    install -m 0644 "$IW620_SRC/moal.ko" "/usr/lib/modules/$KVER/extra/ps5-iw620/moal.ko"
-    install -d /etc/modprobe.d /usr/local/sbin /etc/systemd/system /usr/share/doc/ps5-iw620
-    cat > /etc/modprobe.d/ps5-iw620.conf <<'EOF'
+    # --- PS5 internal WiFi: firmware-stage + autoload service ---
+    # The mlan.ko/moal.ko modules and their modprobe.d options are already
+    # shipped by linux-ps5.rpm (built by kernel-builder/build.sh, which now
+    # applies all PS5 mwifiex patches in one place). The rpm ALSO ships
+    # /etc/modules-load.d/moal which would auto-load moal at boot before
+    # firmware has been copied from /boot/efi — kill that and let our
+    # ps5-iw620.service do the copy+load in the right order.
+    rm -f /etc/modules-load.d/moal
+    install -d /usr/local/sbin /etc/systemd/system /etc/modprobe.d /usr/share/doc/ps5-iw620
+    cat > /etc/modprobe.d/ps5-iw620-noautoload.conf <<'EOF'
     blacklist moal
     blacklist mlan
-    softdep moal pre: cfg80211 mlan
-    options moal fw_name=nxp/pcieuartiw620_combo_v1.bin pcie_int_mode=1 drv_mode=1 cfg80211_wext=4 sta_name=mlan ext_scan=0 auto_fw_reload=0 wifi_reset_config=0 sched_scan=0 ps_mode=2 auto_ds=2 amsdu_disable=1
     EOF
     cat > /usr/local/sbin/ps5-iw620-load <<'EOF'
     #!/bin/sh
@@ -294,4 +278,3 @@ actions:
     EOF
     depmod -a "$KVER"
     systemctl enable ps5-iw620.service
-    rm -rf "$IW620_SRC" "$IW620_PATCHES"

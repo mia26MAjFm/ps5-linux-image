@@ -9,7 +9,7 @@ KERNEL_SRC=""
 CLEAN=false
 IMG_SIZE=12000
 KERNEL_ONLY=false
-PATCHES_REF="v1.3"
+PATCHES_REF="kernel-7.1.1-76db3a4"
 
 MULTI_DISTROS="ubuntu2604 arch cachyos"
 
@@ -85,7 +85,7 @@ esac
 
 if [ -z "$FORMAT" ]; then
     case "$DISTRO" in
-        arch|cachyos)        FORMAT="arch" ;;
+        arch|cachyos|steamos) FORMAT="arch" ;;
         fedora|bazzite*)     FORMAT="rpm"  ;;
         all)                 FORMAT="all"  ;;
         *)                   FORMAT="deb"  ;;
@@ -355,7 +355,8 @@ fi
 
 # --- Step 2: Build distribution image ---
 run_stage "Build image builder image" \
-    docker build -t ps5-image-builder -f "$SCRIPT_DIR/docker/image-builder/Dockerfile" "$SCRIPT_DIR"
+    docker build --pull --no-cache \
+        -t ps5-image-builder -f "$SCRIPT_DIR/docker/image-builder/Dockerfile" "$SCRIPT_DIR"
 
 if [ "$DISTRO" = "all" ]; then
     DOCKER_ARGS=(
